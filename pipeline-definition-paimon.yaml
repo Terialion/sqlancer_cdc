@@ -1,0 +1,16 @@
+---
+pipeline:
+  parallelism: 1
+source:
+  type: mysql
+  hostname: mysql
+  port: 3306
+  username: root
+  password: ''
+  tables: "database0.\\.*"
+  server-id: 5400-6400
+  server-time-zone: UTC
+sink:
+  type: paimon
+  catalog.properties.metastore: filesystem
+  catalog.properties.warehouse: "/data/paimon-warehouse"
