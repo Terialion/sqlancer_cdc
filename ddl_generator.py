@@ -16,6 +16,7 @@ from enum import Enum
 
 class DataType(Enum):
     """MySQL 数据类型"""
+    TINYINT = "TINYINT"
     INT = "INT"
     BIGINT = "BIGINT"
     SMALLINT = "SMALLINT"
@@ -24,9 +25,13 @@ class DataType(Enum):
     FLOAT = "FLOAT"
     DOUBLE = "DOUBLE"
     DECIMAL = "DECIMAL(10,2)"
+    DECIMAL_WIDE = "DECIMAL(18,6)"
     BOOLEAN = "BOOLEAN"
     DATE = "DATE"
     DATETIME = "DATETIME"
+    TIMESTAMP = "TIMESTAMP"
+    CHAR = "CHAR(32)"
+    VARCHAR_WIDE = "VARCHAR(1024)"
 
 
 @dataclass
@@ -55,7 +60,24 @@ class DDLGenerator:
     
     def _generate_data_type(self) -> DataType:
         """随机选择数据类型"""
-        return random.choice(list(DataType))
+        return random.choice([
+            DataType.TINYINT,
+            DataType.SMALLINT,
+            DataType.INT,
+            DataType.BIGINT,
+            DataType.FLOAT,
+            DataType.DOUBLE,
+            DataType.DECIMAL,
+            DataType.DECIMAL_WIDE,
+            DataType.BOOLEAN,
+            DataType.DATE,
+            DataType.DATETIME,
+            DataType.TIMESTAMP,
+            DataType.CHAR,
+            DataType.VARCHAR,
+            DataType.VARCHAR_WIDE,
+            DataType.TEXT,
+        ])
     
     def _generate_columns(self, num_cols: int) -> List[Column]:
         """生成列集合"""
@@ -192,6 +214,7 @@ class DDLGenerator:
         existing_columns: List[str] = None,
         protected_columns: List[str] = None,
         drop_ratio: int = 35,
+        enable_modify: bool = False,
     ) -> List[str]:
         """
         生成 DDL 语句集合
@@ -262,11 +285,18 @@ class DDLGenerator:
                     if stmt_type == "alter_mixed":
                         target_table = created_tables[-1] if created_tables else table_name
                         can_drop = [c for c in schema_cols if c not in protected]
-                        # 更接近 SQLancer 的状态驱动：优先在当前 schema 上混合变更
-                        if can_drop and random.random() < (max(0, min(100, drop_ratio)) / 100.0):
+                        can_modify = [c for c in schema_cols if c not in protected]
+                        drop_prob = max(0, min(100, drop_ratio)) / 100.0
+                        r = random.random()
+
+                        # 混合策略：DROP（可控比例）/MODIFY（约25%）/ADD（其余）
+                        if can_drop and r < drop_prob:
                             drop_col = random.choice(can_drop)
                             stmt = self.generate_alter_table_drop_column(target_table, drop_col)
                             schema_cols = [c for c in schema_cols if c != drop_col]
+                        elif enable_modify and can_modify and r < min(0.95, drop_prob + 0.25):
+                            modify_col = random.choice(can_modify)
+                            stmt = self.generate_alter_table_modify_column(target_table, modify_col)
                         else:
                             stmt = self.generate_alter_table_add_column(target_table, schema_cols)
                             added = self._extract_added_column(stmt)
@@ -308,6 +338,7 @@ def main():
     parser.add_argument("--existing-cols", default="", help="现有列名列表，逗号分隔 (用于 alter_mixed)")
     parser.add_argument("--protected-cols", default="c0", help="禁止删除列名列表，逗号分隔")
     parser.add_argument("--drop-ratio", type=int, default=35, help="alter_mixed 中 DROP COLUMN 概率，0-100")
+    parser.add_argument("--enable-modify", action="store_true", help="允许 alter_mixed 生成 MODIFY COLUMN")
     parser.add_argument("--output-sql", help="输出 SQL 文件")
     parser.add_argument("--output-format", choices=["sql", "csv"], default="sql", help="输出格式")
     
@@ -322,6 +353,7 @@ def main():
         existing_columns=parse_csv_list(args.existing_cols),
         protected_columns=parse_csv_list(args.protected_cols),
         drop_ratio=args.drop_ratio,
+        enable_modify=args.enable_modify,
     )
     
     print(f"[INFO] Generated {len(statements)} {args.type} statements (seed: {args.seed})", file=sys.stderr)

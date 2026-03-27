@@ -1,21 +1,20 @@
----
 pipeline:
   parallelism: 1
 source:
-  type: mysql
-  hostname: mysql
+  type: 'mysql'
+  hostname: 'mysql'
   port: 3306
-  username: root
+  username: 'root'
   password: ''
-  tables: "\\.*.\\.*"
-  server-id: 5400-6400
-  server-time-zone: UTC
+  tables: '\.*.\.*'
+  server-id: '5400-6400'
+  server-time-zone: 'UTC'
 sink:
-  type: doris
-  fenodes: doris:8030
-  benodes: doris:8040
-  jdbc-url: jdbc:mysql://doris:9030
-  username: root
+  type: 'doris'
+  fenodes: 'doris:8030'
+  benodes: 'doris:8040'
+  jdbc-url: 'jdbc:mysql://doris:9030'
+  username: 'root'
   password: ''
-  table.create.properties.light_schema_change: true
+  table.create.properties.light_schema_change: 'true'
   table.create.properties.replication_num: 1

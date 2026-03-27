@@ -66,6 +66,143 @@ bash test_select_verify_sync.sh
 
 ---
 
+## 🆕 批次压测与失败 Seed 经验 (2026-03-25)
+
+### 本轮目标
+
+- 不做单 bug 定向复现，改为通过更丰富随机 DDL/DML 在自动化中提高“自然触发”概率。
+- 用多轮批跑筛选失败 seed，并沉淀可复用排障流程。
+
+### 本轮关键改动（已落地）
+
+- `run_sqlancer_cdc_e2e.sh`
+  - 删除内联 probe（`run_flink36741_probe_if_needed`）及相关环境参数。
+  - 保留主流程 `FLINK36741_MAIN_TRANSFORM` 模式，在 pipeline 提交阶段直接使用 transform alias 触发条件。
+  - 新增汇总指标：`Column count (MySQL/Doris)`、`Final Flink job state`。
+  - 汇总前新增最终收敛重算，避免高压下“瞬时快照”导致误判。
+  - `DDL_ENABLE_MODIFY=auto`：在 Doris sink 下默认关闭 `MODIFY COLUMN`（避免 schema evolve 失败导致 job 重启）。
+  - 提速参数更新：高压默认规模下调（DML/DDL/MIX），状态采样频率降低，等待上限收紧，减少长跑越跑越慢。
+- `ddl_generator.py`
+  - 扩展类型池：`DECIMAL(18,6)`、`TIMESTAMP`、`CHAR(32)`、`VARCHAR(1024)` 等。
+  - `alter_mixed` 支持 `--enable-modify` 开关（默认不启用）。
+- `dml_generator.py`
+  - 扩展数值/时间/文本谓词与值域，增加边界值和复杂条件组合。
+
+### 批跑命令（推荐）
+
+```bash
+cd /home/wyh/flink-cdc/tools/cdcup/playbook_bundle/sqlancer_cdc
+
+AGGRESSIVE_BUG_TRIGGER=1 \
+ROUNDS=3 BASE_SEED=42 SEED_STEP=7 \
+REPORT_DIR=/tmp/cdc_seed_batch_builtin \
+SUMMARY_FILE=/tmp/cdc_seed_batch_builtin_summary.txt \
+WAIT_SYNC=1 PRINT_SCHEMA_SNAPSHOT=0 \
+./run_sqlancer_cdc_e2e.sh
+```
+
+### 本轮批跑结果（seed = 42,49,56）
+
+- seed=42：失败（`round_exit_code=1`）
+  - 特征：Step2 pipeline 提交返回失败；`pipeline_submit.log` 仅显示拷贝成功，无 job id。
+- seed=49：失败（`round_exit_code=1`）
+  - 特征：`ERROR: Flink cluster is not ready (no active taskmanagers)`，属于环境/资源态失败。
+- seed=56：通过（`round_exit_code=0`）
+  - 结果：`Row count (MySQL/Doris): 4/4`，`Column count (MySQL/Doris): 50/50`，`Final Flink job state: RUNNING`。
+
+### 结论与判定建议
+
+- 这组失败 seed 的主因是“环境稳定性”（pipeline 提交/cluster readiness），不是数据一致性逻辑本身。
+- 建议把失败分类拆分为两层：
+  - **Infra 失败**：无 active taskmanager、pipeline 无 job id、容器未就绪。
+  - **Consistency 失败**：row/column 不一致，且 job 状态非 RUNNING。
+
+### 建议的失败 Seed 复跑顺序
+
+1. 先恢复环境：`./cdcup.sh up`，确认 mysql/doris/jobmanager/taskmanager 均 running。
+2. 清理活动作业并等待：取消旧 job 后等待 10s 再提交流水线。
+3. 单 seed 重跑：`ROUNDS=1 BASE_SEED=<seed>` 单独复测，避免批跑串扰。
+4. 只在环境稳定后再判定是否为一致性失败。
+
+### 高压模式通过基线（推荐）
+
+- `rc=0`
+- `Row count (MySQL/Doris)` 一致
+- `Column count (MySQL/Doris)` 一致
+- `Final Flink job state=RUNNING`
+
+### FLINK-36656 复现方法（boolean/tinyint(1) 分片场景）
+
+目标问题：`Flink CDC treats MySQL Sharding table with boolean type conversion error`（`NumberFormatException: "true"`）。
+
+1. 先做环境收敛（必须）
+
+```bash
+cd /home/wyh/flink-cdc/tools/cdcup
+
+# 取消所有 RUNNING 作业，避免 NoResourceAvailableException 干扰
+JM_PORT=$(docker compose port jobmanager 8081 | awk -F: '{print $NF}' | tail -n1)
+for jid in $(curl -s "http://127.0.0.1:${JM_PORT}/jobs/overview" \
+  | sed -n 's/.*"jid":"\([a-f0-9]\+\)".*"state":"RUNNING".*/\1/p'); do
+  curl -s -X PATCH "http://127.0.0.1:${JM_PORT}/jobs/${jid}?mode=cancel" >/dev/null 2>&1 || true
+done
+```
+
+2. 关闭 FLINK-36741 主流程模式，避免干扰
+
+```bash
+FLINK36741_MAIN_TRANSFORM=0 AGGRESSIVE_BUG_TRIGGER=0 ./run_sqlancer_cdc_e2e.sh
+```
+
+3. 准备分片表：先建 `full_types_0`，启动 pipeline 后再建 `full_types_1`
+
+关键 schema：
+
+```sql
+CREATE TABLE full_types_0 (
+  id BIGINT PRIMARY KEY,
+  tiny1_c TINYINT(1) DEFAULT '0',
+  boolean_c BOOLEAN DEFAULT '0'
+);
+CREATE TABLE full_types_1 (
+  id BIGINT PRIMARY KEY,
+  tiny1_c TINYINT(1) DEFAULT '0',
+  boolean_c BOOLEAN DEFAULT '0'
+);
+INSERT INTO full_types_0 VALUES (1, true, true);
+INSERT INTO full_types_1 VALUES (1, true, true);
+```
+
+4. 提交 pipeline（建议显式列出分片表，避免正则写法误触发配置解析问题）
+
+```yaml
+source:
+  type: mysql
+  hostname: mysql
+  port: 3306
+  username: root
+  password: ''
+  tables: "flink36656_db.full_types_0,flink36656_db.full_types_1"
+  server-id: 6401-7400
+  server-time-zone: UTC
+sink:
+  type: doris
+  fenodes: doris:8030
+  benodes: doris:8040
+  jdbc-url: jdbc:mysql://doris:9030
+  username: root
+  password: ''
+```
+
+5. 判定标准
+
+- 命中复现：job exception 出现 `NumberFormatException` 或 `For input string: "true"`。
+- 未命中：无上述异常。
+- 若出现 `NoResourceAvailableException`，先回到第 1 步收敛环境后重试。
+
+
+---
+
 ## 🛠️ 工具参考手册
 
 ### DML 生成器
@@ -263,18 +400,17 @@ DML_COUNT=20 DDL_COUNT=5 MIXED_COUNT=30 \
 
 ### 快速找 Bug 模式（低延迟）
 
-当你主要目标是快速复现问题（而不是最严格稳定性验证）时，可开启：
-
-```bash
-FAST_MODE=1 PIPELINE_YAML=pipeline-definition.yaml ./run_sqlancer_cdc_e2e.sh
-```
-
-`FAST_MODE=1` 会自动压缩等待参数上限：
+当前脚本已内置低延迟上限（无需 `FAST_MODE`）：
 
 - `WAIT_SYNC` 最多 2s
-- `WAIT_TABLE_TIMEOUT` 最多 90s
-- `DDL_SYNC_TIMEOUT` 最多 45s
-- mixed 后行数收敛重试轮次从 90 降到 30
+- `WAIT_TABLE_TIMEOUT` 最多 45s
+- `DDL_SYNC_TIMEOUT` 最多 20s
+- mixed 后行数收敛重试轮次从 90 降到 20
+
+高压模式额外提速：
+
+- 最小规模默认调整为：`DML_COUNT=100`、`DDL_COUNT=16`、`MIXED_COUNT=80`
+- `MIX_DML_POOL_REFILL_SIZE` 最小值提高到 80（减少频繁重建语句池）
 
 ### 本次实测结果摘要
 
@@ -307,7 +443,7 @@ FAST_MODE=1 PIPELINE_YAML=pipeline-definition.yaml ./run_sqlancer_cdc_e2e.sh
 mysql -h 127.0.0.1 -P 32774 -u root database0 \
   -e "DROP TABLE IF EXISTS t0; CREATE TABLE t0 (
     c0 INT PRIMARY KEY, c1 VARCHAR(50) NOT NULL, 
-    c2 INT, c3 VARCHAR(50), c4 FLOAT
+    c2 INT, c3 VARCHAR(50), c4 DECIMAL(10,2)
   );"
 
 sleep 5
@@ -490,7 +626,7 @@ mysql -h 127.0.0.1 -P 32774 -u root database0 -e "INSERT INTO t0 (c0, c1) VALUES
 mysql -h 127.0.0.1 -P 32774 -u root database0 \
   -e "DROP TABLE IF EXISTS t0; CREATE TABLE t0 (
     c0 INT PRIMARY KEY, c1 VARCHAR(50) NOT NULL, 
-    c2 INT, c3 VARCHAR(50), c4 FLOAT
+    c2 INT, c3 VARCHAR(50), c4 DECIMAL(10,2)
   );"
 ```
 
@@ -556,7 +692,7 @@ sleep 10
 mysql -h 127.0.0.1 -P 32774 -u root database0 \
   -e "CREATE TABLE t0 (
     c0 INT PRIMARY KEY, c1 VARCHAR(50) NOT NULL, 
-    c2 INT, c3 VARCHAR(50), c4 FLOAT
+    c2 INT, c3 VARCHAR(50), c4 DECIMAL(10,2)
   );"
 ```
 
@@ -589,6 +725,53 @@ docker-compose up -d
 
 ---
 
+### 问题 5: Step 3 长时间停在 "Wait for sink table creation in Doris"
+
+**症状**:
+- e2e 在 Step 3 超时，报告 `Sink table not detected within xxxs`
+- Flink Job 日志出现：`NoClassDefFoundError: Could not initialize class io.debezium.connector.mysql.MySqlConnectorConfig`
+- 进一步日志可见：`ClassNotFoundException: com.mysql.cj.jdbc.Driver`
+
+**原因**:
+- 从 `playbook_bundle/sqlancer_cdc` 目录直接运行时，`run_sqlancer_cdc_e2e.sh` 会调用同目录下的 `./cdcup.sh`。
+- 若该目录没有 `cdc/lib/mysql-connector-java.jar` 的可见路径，提交 pipeline 时不会带上 MySQL JDBC 驱动，导致 MySQL Source 初始化失败，Doris 自然不会建表。
+
+**排查**:
+```bash
+# 1) 看 jobmanager 日志关键根因
+cd /home/wyh/flink-cdc/tools/cdcup
+docker compose exec jobmanager sh -c \
+  'grep -nE "MySqlConnectorConfig|com.mysql.cj.jdbc.Driver|ClassNotFoundException" \
+  /opt/flink/log/flink--standalonesession-0-jobmanager.log | tail -n 40'
+
+# 2) 确认当前运行目录是否能看到 cdc/lib
+cd /home/wyh/flink-cdc/tools/cdcup/playbook_bundle/sqlancer_cdc
+ls -lh cdc/lib/mysql-connector-java.jar
+```
+
+**解决方案（已实测）**:
+```bash
+cd /home/wyh/flink-cdc/tools/cdcup/playbook_bundle/sqlancer_cdc
+
+# 让 playbook 目录复用根目录资源
+ln -sf ../../cdcup.sh cdcup.sh
+ln -sfn ../../cdc cdc
+ln -sfn ../../docker-compose.yaml docker-compose.yaml
+
+# 关键：复用已有 compose 项目名，否则会误判容器未启动
+COMPOSE_PROJECT_NAME=cdcup \
+PIPELINE_YAML=pipeline-definition-doris.yaml \
+DML_COUNT=8 DDL_COUNT=1 MIXED_COUNT=4 \
+WAIT_SYNC=5 WAIT_TABLE_TIMEOUT=180 DDL_SYNC_TIMEOUT=120 \
+./run_sqlancer_cdc_e2e.sh
+```
+
+**实测结果**:
+- Step 3 成功通过：`Sink ready in Doris: database0.t0`
+- 最终报告：`/tmp/cdc_sqlancer_42/source_sink_final_state.txt`
+
+---
+
 ## 📋 参考信息
 
 ### 环境配置
@@ -610,7 +793,7 @@ CREATE TABLE t0 (
   c1 VARCHAR(50) NOT NULL,     -- 非空字符串
   c2 INT,                       -- 可空整数
   c3 VARCHAR(50),               -- 可空字符串
-  c4 FLOAT                      -- 可空浮点
+  c4 DECIMAL(10,2)              -- 可空定点小数（用于 FLINK-36741 检查）
 ) ENGINE=InnoDB;
 ```
 

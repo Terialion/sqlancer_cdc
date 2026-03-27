@@ -89,7 +89,7 @@ class ValueGenerator:
         elif col.data_type == DataType.INT:
             return str(random.randint(-100000, 100000))
         elif col.data_type == DataType.BIGINT:
-            return str(random.randint(-100000, 100000))
+            return str(random.randint(-10**12, 10**12))
         elif col.data_type == DataType.VARCHAR:
             tokens = ["Alice", "Bob", "Charlie", "David", "Eve", "Frank", "User", "Alpha", "Beta", "Gamma"]
             suffix = random.choice(["", "-x", "_v2", "#tag", "-long-text"])
@@ -103,8 +103,10 @@ class ValueGenerator:
                 "stateful_random_data",
             ]
             return f"'{random.choice(texts)}'"
-        elif col.data_type in [DataType.FLOAT, DataType.DOUBLE, DataType.DECIMAL]:
-            return str(round(random.uniform(-100000.0, 100000.0), 4))
+        elif col.data_type in [DataType.FLOAT, DataType.DOUBLE]:
+            return str(round(random.uniform(-100000.0, 100000.0), random.choice([3, 4, 6])))
+        elif col.data_type == DataType.DECIMAL:
+            return str(round(random.uniform(-100000.0, 100000.0), random.choice([2, 4, 6])))
         elif col.data_type == DataType.BOOLEAN:
             return random.choice(["0", "1"])
         elif col.data_type in [DataType.DATETIME, DataType.TIMESTAMP]:
@@ -273,6 +275,11 @@ class DMLGenerator:
             if op == "LIKE":
                 return f"`{col.name}` LIKE '{random.choice(['A', 'B', 'C', 'User', 'Alpha'])}%'"
             return f"`{col.name}` {op} '{random.choice(['Alice', 'Bob', 'User1', 'Alpha7'])}'"
+        elif col.data_type == DataType.TEXT:
+            form = random.choice(["like", "isnotnull"])
+            if form == "like":
+                return f"`{col.name}` LIKE '%{random.choice(['sync', 'edge', 'payload', 'test'])}%'"
+            return f"`{col.name}` IS NOT NULL"
         elif col.data_type == DataType.BOOLEAN:
             value = random.choice(["0", "1"])
             return f"`{col.name}` = {value}"
@@ -280,6 +287,10 @@ class DMLGenerator:
             op = random.choice([">", "<", ">=", "<="])
             value = round(random.uniform(-1000, 1000), 3)
             return f"`{col.name}` {op} {value}"
+        elif col.data_type in [DataType.DATE, DataType.DATETIME, DataType.TIMESTAMP]:
+            if random.random() < 0.5:
+                return f"`{col.name}` >= '{random.randint(2020, 2024)}-01-01'"
+            return f"`{col.name}` IS NOT NULL"
         else:
             return f"`{col.name}` IS NOT NULL"
     
@@ -351,7 +362,13 @@ def parse_data_type(type_name: str) -> DataType:
         return DataType.TINYINT
     if t.startswith("VARCHAR"):
         return DataType.VARCHAR
+    if t.startswith("CHAR"):
+        return DataType.VARCHAR
+    if t.startswith("VARBINARY") or t.startswith("BINARY"):
+        return DataType.VARCHAR
     if t.startswith("TEXT"):
+        return DataType.TEXT
+    if t.startswith("JSON"):
         return DataType.TEXT
     if t.startswith("FLOAT"):
         return DataType.FLOAT
