@@ -366,9 +366,9 @@ def write_configs(
     try:
         compose_path.write_text(compose_yaml, encoding="utf-8")
         pipeline_path.write_text(pipeline_yaml, encoding="utf-8")
-    except PermissionError:
-        print(f"\nERROR: 无法写入输出目录 {output_dir}", file=sys.stderr)
-        print("请使用 -o/--output-dir 指定可写目录，例如: -o /tmp/pull_images_out", file=sys.stderr)
+    except PermissionError as exc:
+        print(f"ERROR: 无法写入输出目录 {output_dir}: {exc}", file=sys.stderr)
+        print("建议: 使用 -o/--output-dir 指定可写目录，例如: -o /tmp/pull_images_run", file=sys.stderr)
         raise
     print(f"\n已生成: {compose_path}")
     print(f"已生成: {pipeline_path}")
@@ -455,6 +455,13 @@ def choose_image(preset_key: str) -> ImageChoice:
 def default_image_choice(preset_key: str) -> ImageChoice:
     preset = IMAGE_PRESETS[preset_key]
     return ImageChoice(name=preset.label, repository=preset.default_repository, tag=preset.default_tag)
+
+
+def override_image_tag(choice: ImageChoice, tag_override: str) -> ImageChoice:
+    if not tag_override:
+        return choice
+    choice.tag = tag_override
+    return choice
 
 
 def prompt_mode() -> str:
@@ -652,6 +659,7 @@ def download_cdc_artifacts(
 
 
 def parse_args() -> argparse.Namespace:
+    script_dir = Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(
         description="交互式拉取 cdcup 镜像并下载 CDC/JAR 依赖",
         epilog=(
@@ -668,7 +676,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "-o",
         "--output-dir",
-        default=str(Path(__file__).resolve().parent),
+        default=str(script_dir),
         help="docker-compose.yaml 与 pipeline-definition.yaml 输出目录（默认脚本目录）",
     )
     parser.add_argument(
@@ -676,6 +684,35 @@ def parse_args() -> argparse.Namespace:
         "--project-name",
         default="",
         help="Compose 项目名称（影响容器命名；留空则交互输入）",
+    )
+    parser.add_argument("--batch", action="store_true", help="非交互模式（适合 CI）")
+    parser.add_argument("--mode", choices=["quick", "advanced"], default="", help="运行模式（batch 时生效）")
+    parser.add_argument(
+        "--source-type",
+        choices=["mysql", "postgres", "values"],
+        default="",
+        help="source 类型（batch 时生效）",
+    )
+    parser.add_argument(
+        "--sink-type",
+        choices=["doris", "kafka", "paimon", "starrocks", "elasticsearch", "iceberg", "hudi", "values"],
+        default="",
+        help="sink 类型（batch 时生效）",
+    )
+    parser.add_argument("--cdc-version", choices=CDC_VERSIONS, default="", help="Flink CDC 版本（batch 时生效）")
+    parser.add_argument("--pull-cdc-image", action="store_true", help="batch 模式下额外拉取 Flink CDC 镜像")
+    parser.add_argument("--skip-image-pull", action="store_true", help="跳过 docker pull，仅下载依赖和/或生成配置")
+    parser.add_argument("--skip-download-cdc", action="store_true", help="跳过 CDC 包与 connector/lib 下载")
+    parser.add_argument("--skip-generate-files", action="store_true", help="跳过 docker-compose/pipeline 文件生成")
+    parser.add_argument("--flink-tag", default="", help="batch 模式下覆盖 Flink runtime tag")
+    parser.add_argument("--flinkcdc-tag", default="", help="batch 模式下覆盖 Flink CDC image tag")
+    parser.add_argument("--mysql-tag", default="", help="batch 模式下覆盖 MySQL image tag")
+    parser.add_argument("--doris-tag", default="", help="batch 模式下覆盖 Doris image tag")
+    parser.add_argument(
+        "--stack-profile",
+        choices=["", "flink35852-near311"],
+        default="",
+        help="一键应用预设运行栈（仅 batch 模式生效）",
     )
     return parser.parse_args()
 
@@ -694,82 +731,167 @@ def main() -> int:
         print("ERROR: 未检测到 tar 命令", file=sys.stderr)
         return 2
 
-    total_steps = 6
-
-    print_banner()
-    print("支持独立选择 Flink/FlinkCDC/source/sink，可下载 cdc 包、connector 和 lib jars。")
-
     chosen_images: List[ImageChoice] = []
     image_ref_map: Dict[str, str] = {}
-    print_progress(1, total_steps, "选择运行模式")
-    mode = prompt_mode()
 
-    print("\n已选择模式:", "快速模式" if mode == "quick" else "自定义模式")
+    if args.batch and args.stack_profile == "flink35852-near311":
+        # Near-repro profile for FLINK-35852:
+        # Flink 1.18.x + CDC 3.1.1 + MySQL 8.0 + Doris 2.1.0
+        # (Doris 2.0.6/2.0.5 may be unavailable in some environments.)
+        if not args.mode:
+            args.mode = "quick"
+        if not args.source_type:
+            args.source_type = "mysql"
+        if not args.sink_type:
+            args.sink_type = "doris"
+        if not args.cdc_version:
+            args.cdc_version = "3.1.1"
+        if not args.flink_tag:
+            args.flink_tag = "1.18.1-scala_2.12"
+        if not args.mysql_tag:
+            args.mysql_tag = "8.0"
+        if not args.doris_tag:
+            args.doris_tag = "doris-all-in-one-2.1.0"
+        if not args.flinkcdc_tag:
+            args.flinkcdc_tag = "3.1.1"
+        args.pull_cdc_image = True
+    if args.batch:
+        mode = args.mode or "quick"
+        source_type = args.source_type or "mysql"
+        sink_type = args.sink_type or "doris"
+        cdc_version = args.cdc_version or "3.2.1"
+        do_cdc_download = not args.skip_download_cdc
+        do_generate_files = not args.skip_generate_files
+        project_name = args.project_name.strip() or "cdcup"
 
-    print_progress(2, total_steps, "基础镜像")
-    print_section("基础镜像")
-    print_runtime_glossary()
-    if prompt_yes_no("是否拉取 Flink runtime 镜像？", default_yes=True):
-        chosen = default_image_choice("flink") if mode == "quick" else choose_image("flink")
-        chosen_images.append(chosen)
-        image_ref_map["flink"] = chosen.ref
+        if not args.skip_image_pull:
+            flink_choice = default_image_choice("flink") if mode == "quick" else choose_image("flink")
+            flink_choice = override_image_tag(flink_choice, args.flink_tag.strip())
+            chosen_images.append(flink_choice)
+            image_ref_map["flink"] = flink_choice.ref
 
-    print_progress(3, total_steps, "CDC 版本")
-    print_section("CDC 版本")
-    cdc_version = prompt_from_list("\n选择 Flink CDC 版本（用于 cdc 包与 connector 版本）:", CDC_VERSIONS, "3.2.1")
+            if args.pull_cdc_image:
+                cdc_img = default_image_choice("flinkcdc") if mode == "quick" else choose_image("flinkcdc")
+                cdc_img.tag = cdc_version
+                cdc_img = override_image_tag(cdc_img, args.flinkcdc_tag.strip())
+                chosen_images.append(cdc_img)
+                image_ref_map["flinkcdc"] = cdc_img.ref
 
-    if prompt_yes_no("是否拉取 Flink CDC 镜像？", default_yes=False):
-        cdc_img = default_image_choice("flinkcdc") if mode == "quick" else choose_image("flinkcdc")
-        cdc_img.tag = cdc_version
-        chosen_images.append(cdc_img)
-        image_ref_map["flinkcdc"] = cdc_img.ref
+            if source_type == "mysql":
+                chosen = default_image_choice("mysql") if mode == "quick" else choose_image("mysql")
+                chosen = override_image_tag(chosen, args.mysql_tag.strip())
+                chosen_images.append(chosen)
+                image_ref_map["mysql"] = chosen.ref
+            elif source_type == "postgres":
+                chosen = default_image_choice("postgres") if mode == "quick" else choose_image("postgres")
+                chosen_images.append(chosen)
+                image_ref_map["postgres"] = chosen.ref
 
-    print_progress(4, total_steps, "Source / Sink")
-    print_section("Source / Sink")
-    source_type, sink_type = prompt_source_sink()
+            if sink_type == "doris":
+                chosen = default_image_choice("doris") if mode == "quick" else choose_image("doris")
+                chosen = override_image_tag(chosen, args.doris_tag.strip())
+                chosen_images.append(chosen)
+                image_ref_map["doris"] = chosen.ref
+            elif sink_type == "starrocks":
+                chosen = default_image_choice("starrocks") if mode == "quick" else choose_image("starrocks")
+                chosen_images.append(chosen)
+                image_ref_map["starrocks"] = chosen.ref
+            elif sink_type == "kafka":
+                zk = default_image_choice("zookeeper") if mode == "quick" else choose_image("zookeeper")
+                kk = default_image_choice("kafka") if mode == "quick" else choose_image("kafka")
+                chosen_images.append(zk)
+                chosen_images.append(kk)
+                image_ref_map["zookeeper"] = zk.ref
+                image_ref_map["kafka"] = kk.ref
+            elif sink_type == "elasticsearch":
+                chosen = default_image_choice("elasticsearch") if mode == "quick" else choose_image("elasticsearch")
+                chosen_images.append(chosen)
+                image_ref_map["elasticsearch"] = chosen.ref
 
-    if source_type == "mysql" and prompt_yes_no("是否拉取 MySQL source 镜像？", default_yes=True):
-        chosen = default_image_choice("mysql") if mode == "quick" else choose_image("mysql")
-        chosen_images.append(chosen)
-        image_ref_map["mysql"] = chosen.ref
-    elif source_type == "postgres" and prompt_yes_no("是否拉取 Postgres source 镜像？", default_yes=True):
-        chosen = default_image_choice("postgres") if mode == "quick" else choose_image("postgres")
-        chosen_images.append(chosen)
-        image_ref_map["postgres"] = chosen.ref
+        print("\n[batch] 执行摘要:")
+        print(f"- mode: {mode}")
+        print(f"- source/sink: {source_type} -> {sink_type}")
+        print(f"- Flink CDC version: {cdc_version}")
+        print(f"- Compose project name: {project_name}")
+        print(f"- 拉取镜像: {'否' if args.skip_image_pull else '是'}")
+        print(f"- 拉取 Flink CDC 镜像: {'是' if args.pull_cdc_image else '否'}")
+        print(f"- 下载 CDC 依赖: {'是' if do_cdc_download else '否'}")
+        print(f"- 生成配置文件: {'是' if do_generate_files else '否'}")
+    else:
+        total_steps = 6
 
-    if sink_type == "doris" and prompt_yes_no("是否拉取 Doris sink 镜像？", default_yes=True):
-        chosen = default_image_choice("doris") if mode == "quick" else choose_image("doris")
-        chosen_images.append(chosen)
-        image_ref_map["doris"] = chosen.ref
-    elif sink_type == "starrocks" and prompt_yes_no("是否拉取 StarRocks sink 镜像？", default_yes=True):
-        chosen = default_image_choice("starrocks") if mode == "quick" else choose_image("starrocks")
-        chosen_images.append(chosen)
-        image_ref_map["starrocks"] = chosen.ref
-    elif sink_type == "kafka":
-        if prompt_yes_no("是否拉取 Kafka sink 相关镜像（kafka + zookeeper）？", default_yes=True):
-            zk = default_image_choice("zookeeper") if mode == "quick" else choose_image("zookeeper")
-            kk = default_image_choice("kafka") if mode == "quick" else choose_image("kafka")
-            chosen_images.append(zk)
-            chosen_images.append(kk)
-            image_ref_map["zookeeper"] = zk.ref
-            image_ref_map["kafka"] = kk.ref
-    elif sink_type == "elasticsearch" and prompt_yes_no("是否拉取 Elasticsearch sink 镜像？", default_yes=True):
-        chosen = default_image_choice("elasticsearch") if mode == "quick" else choose_image("elasticsearch")
-        chosen_images.append(chosen)
-        image_ref_map["elasticsearch"] = chosen.ref
+        print_banner()
+        print("支持独立选择 Flink/FlinkCDC/source/sink，可下载 cdc 包、connector 和 lib jars。")
 
-    if chosen_images:
-        print("\n将拉取以下镜像:")
-        for item in chosen_images:
-            print(f"- {item.name}: {item.ref}")
+        print_progress(1, total_steps, "选择运行模式")
+        mode = prompt_mode()
 
-    print_progress(5, total_steps, "产物与配置")
-    print_section("产物与配置")
-    do_cdc_download = prompt_yes_no("是否下载 Flink CDC 包与 connector/lib jars？", default_yes=True)
-    do_generate_files = prompt_yes_no("是否生成 docker-compose.yaml 与 pipeline-definition.yaml？", default_yes=True)
-    project_name = args.project_name.strip()
-    if not project_name:
-        project_name = prompt_project_name("cdcup")
+        print("\n已选择模式:", "快速模式" if mode == "quick" else "自定义模式")
+
+        print_progress(2, total_steps, "基础镜像")
+        print_section("基础镜像")
+        print_runtime_glossary()
+        if prompt_yes_no("是否拉取 Flink runtime 镜像？", default_yes=True):
+            chosen = default_image_choice("flink") if mode == "quick" else choose_image("flink")
+            chosen_images.append(chosen)
+            image_ref_map["flink"] = chosen.ref
+
+        print_progress(3, total_steps, "CDC 版本")
+        print_section("CDC 版本")
+        cdc_version = prompt_from_list("\n选择 Flink CDC 版本（用于 cdc 包与 connector 版本）:", CDC_VERSIONS, "3.2.1")
+
+        if prompt_yes_no("是否拉取 Flink CDC 镜像？", default_yes=False):
+            cdc_img = default_image_choice("flinkcdc") if mode == "quick" else choose_image("flinkcdc")
+            cdc_img.tag = cdc_version
+            chosen_images.append(cdc_img)
+            image_ref_map["flinkcdc"] = cdc_img.ref
+
+        print_progress(4, total_steps, "Source / Sink")
+        print_section("Source / Sink")
+        source_type, sink_type = prompt_source_sink()
+
+        if source_type == "mysql" and prompt_yes_no("是否拉取 MySQL source 镜像？", default_yes=True):
+            chosen = default_image_choice("mysql") if mode == "quick" else choose_image("mysql")
+            chosen_images.append(chosen)
+            image_ref_map["mysql"] = chosen.ref
+        elif source_type == "postgres" and prompt_yes_no("是否拉取 Postgres source 镜像？", default_yes=True):
+            chosen = default_image_choice("postgres") if mode == "quick" else choose_image("postgres")
+            chosen_images.append(chosen)
+            image_ref_map["postgres"] = chosen.ref
+
+        if sink_type == "doris" and prompt_yes_no("是否拉取 Doris sink 镜像？", default_yes=True):
+            chosen = default_image_choice("doris") if mode == "quick" else choose_image("doris")
+            chosen_images.append(chosen)
+            image_ref_map["doris"] = chosen.ref
+        elif sink_type == "starrocks" and prompt_yes_no("是否拉取 StarRocks sink 镜像？", default_yes=True):
+            chosen = default_image_choice("starrocks") if mode == "quick" else choose_image("starrocks")
+            chosen_images.append(chosen)
+            image_ref_map["starrocks"] = chosen.ref
+        elif sink_type == "kafka":
+            if prompt_yes_no("是否拉取 Kafka sink 相关镜像（kafka + zookeeper）？", default_yes=True):
+                zk = default_image_choice("zookeeper") if mode == "quick" else choose_image("zookeeper")
+                kk = default_image_choice("kafka") if mode == "quick" else choose_image("kafka")
+                chosen_images.append(zk)
+                chosen_images.append(kk)
+                image_ref_map["zookeeper"] = zk.ref
+                image_ref_map["kafka"] = kk.ref
+        elif sink_type == "elasticsearch" and prompt_yes_no("是否拉取 Elasticsearch sink 镜像？", default_yes=True):
+            chosen = default_image_choice("elasticsearch") if mode == "quick" else choose_image("elasticsearch")
+            chosen_images.append(chosen)
+            image_ref_map["elasticsearch"] = chosen.ref
+
+        if chosen_images:
+            print("\n将拉取以下镜像:")
+            for item in chosen_images:
+                print(f"- {item.name}: {item.ref}")
+
+        print_progress(5, total_steps, "产物与配置")
+        print_section("产物与配置")
+        do_cdc_download = prompt_yes_no("是否下载 Flink CDC 包与 connector/lib jars？", default_yes=True)
+        do_generate_files = prompt_yes_no("是否生成 docker-compose.yaml 与 pipeline-definition.yaml？", default_yes=True)
+        project_name = args.project_name.strip()
+        if not project_name:
+            project_name = prompt_project_name("cdcup")
 
     print("\n🧾 执行摘要:")
     print(f"- source/sink: {source_type} -> {sink_type}")
@@ -802,10 +924,14 @@ def main() -> int:
         print("未选择任何动作，退出。")
         return 0
 
-    print_progress(6, total_steps, "确认并执行")
-    if not prompt_yes_no("\n确认执行上述动作？", default_yes=True):
-        print("已取消。")
-        return 0
+    if not args.batch:
+        print_progress(6, total_steps, "确认并执行")
+    if args.batch:
+        print("\n[batch] 自动确认执行")
+    else:
+        if not prompt_yes_no("\n确认执行上述动作？", default_yes=True):
+            print("已取消。")
+            return 0
 
     failed = 0
     if chosen_images:
