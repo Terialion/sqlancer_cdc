@@ -13,7 +13,7 @@ DORIS_LOG="/tmp/ci_e2e_doris_${BASE_SEED}.log"
 PAIMON_LOG="/tmp/ci_e2e_paimon_${BASE_SEED}.log"
 
 echo "[CI] Step 1/3 pull_images batch dry-run"
-python3 "${SCRIPT_DIR}/pull_images.py" \
+python3 "${SCRIPT_DIR}/tools/pull_images.py" \
   --batch \
   --mode quick \
   --source-type mysql \

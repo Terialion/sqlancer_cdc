@@ -95,17 +95,17 @@ REPORT="$OUTPUT_DIR/test_report.txt"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 } | tee -a "$REPORT"
 
-"$PYTHON_BIN" "$SCRIPT_DIR/dml_generator.py" \
+"$PYTHON_BIN" "$SCRIPT_DIR/generators/dml_generator.py" \
     --count "$DML_COUNT" --seed "$BASE_SEED" \
     --output-sql "$OUTPUT_DIR/dml_statements.sql" \
     2>&1 | grep "\[INFO\]" | tee -a "$REPORT"
 
-"$PYTHON_BIN" "$SCRIPT_DIR/ddl_generator.py" \
+"$PYTHON_BIN" "$SCRIPT_DIR/generators/ddl_generator.py" \
     --count "$DDL_COUNT" --seed "$((BASE_SEED + 1))" \
     --output-sql "$OUTPUT_DIR/ddl_statements.sql" \
     2>&1 | grep "\[INFO\]" | tee -a "$REPORT"
 
-"$PYTHON_BIN" "$SCRIPT_DIR/select_generator.py" \
+"$PYTHON_BIN" "$SCRIPT_DIR/generators/select_generator.py" \
     --count "$SELECT_COUNT" --seed "$((BASE_SEED + 2))" \
     --output-sql "$OUTPUT_DIR/select_statements.sql" \
     2>&1 | grep "\[INFO\]" | tee -a "$REPORT"

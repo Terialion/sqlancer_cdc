@@ -347,7 +347,6 @@ MIXED_SQL="${REPORT_DIR}/phase_mixed.sql"
 STATUS_FILE="${REPORT_DIR}/realtime_status.log"
 PQS_PROBE_LOG="${REPORT_DIR}/pqs_presence_probe.log"
 SCHEMA_PQS_VALIDATOR_LOG="${REPORT_DIR}/schema_pqs_validator.log"
-FLINK36864_PROBE_LOG="${REPORT_DIR}/flink36864_probe.log"
 EXPERIMENT_ARCHIVE_FILE="${REPORT_DIR}/experiment_archive.txt"
 SCHEMA_PQS_SLEEP_SECONDS="${SCHEMA_PQS_SLEEP_SECONDS:-5}"
 SCHEMA_PQS_TRIALS="${SCHEMA_PQS_TRIALS:-3}"
@@ -925,9 +924,6 @@ write_experiment_archive() {
     echo "pqs_probe_enabled=${ENABLE_PQS_PRESENCE_PROBE}"
     echo "pqs_probe_log=${PQS_PROBE_LOG}"
     echo "schema_pqs_validator_log=${SCHEMA_PQS_VALIDATOR_LOG}"
-    echo "flink36864_probe_enabled=1"
-    echo "flink36864_probe_chance=35"
-    echo "flink36864_probe_log=${FLINK36864_PROBE_LOG}"
   } > "${EXPERIMENT_ARCHIVE_FILE}"
 }
 
@@ -1071,7 +1067,7 @@ refill_mixed_dml_pool() {
   cols_spec=$(build_dml_columns_spec)
 
   mapfile -t MIX_DML_POOL < <(
-    "${PYTHON_BIN}" "${SCRIPT_DIR}/dml_generator.py" \
+    "${PYTHON_BIN}" "${SCRIPT_DIR}/generators/dml_generator.py" \
       --count "${MIX_DML_POOL_REFILL_SIZE}" \
       --seed "${seed}" \
       --type all \
@@ -1089,7 +1085,7 @@ refill_mixed_ddl_pool() {
   existing_cols=$(get_source_columns_csv)
 
   mapfile -t MIX_DDL_POOL < <(
-    "${PYTHON_BIN}" "${SCRIPT_DIR}/ddl_generator.py" \
+    "${PYTHON_BIN}" "${SCRIPT_DIR}/generators/ddl_generator.py" \
       --count "${MIX_DDL_POOL_REFILL_SIZE}" \
       --seed "${seed}" \
       --type alter_mixed \
@@ -1318,7 +1314,6 @@ fi
 STATUS_EVENT_COUNTER=0
 STATUS_LAST_SOURCE_COUNT="NA"
 STATUS_LAST_SINK_COUNT="NA"
-FLINK36864_PROBE_RESULT="SKIPPED"
 
 append_report ""
 append_report "[Step 1] Create source database/table"
@@ -1357,42 +1352,6 @@ else
   append_report "Sink reset skipped for ${SINK_LABEL} (no SQL endpoint)"
 fi
 append_status "bootstrap" 1 "init" "ok" "sink bootstrap" "reset sink object"
-step_timer_end
-
-append_report ""
-append_report "[Step 1.5] Probabilistic FLINK-36864 probe"
-step_timer_start "Step 1.5 FLINK-36864 probe"
-
-FLINK36864_PROBE_CHANCE_FIXED=35
-probe_roll=$((RANDOM % 100))
-if [[ ${probe_roll} -lt ${FLINK36864_PROBE_CHANCE_FIXED} ]]; then
-  set +e
-  PROBE_DATABASE="flink36864_probe" \
-  PROBE_TABLE="t_flink36864_${BASE_SEED}" \
-  PIPELINE_LOG="${FLINK36864_PROBE_LOG}" \
-  bash "${SCRIPT_DIR}/flink36864_int_literal_probe.sh" > "${FLINK36864_PROBE_LOG}" 2>&1
-  PROBE_RC=$?
-  set -e
-
-  if [[ ${PROBE_RC} -ne 0 ]]; then
-    FLINK36864_PROBE_RESULT="ERROR"
-    append_report "FLINK-36864 probe execution failed (non-strict). Log: ${FLINK36864_PROBE_LOG}"
-    tail -n 80 "${FLINK36864_PROBE_LOG}" | tee -a "${REPORT_FILE}" || true
-  else
-    if grep -q '^\[FLINK-36864\] REPRODUCED' "${FLINK36864_PROBE_LOG}"; then
-      FLINK36864_PROBE_RESULT="REPRODUCED"
-      append_report "FLINK-36864 probe result: REPRODUCED"
-    else
-      FLINK36864_PROBE_RESULT="NOT_REPRODUCED"
-      append_report "FLINK-36864 probe result: NOT_REPRODUCED"
-    fi
-    append_report "FLINK-36864 probe log: ${FLINK36864_PROBE_LOG}"
-  fi
-else
-  FLINK36864_PROBE_RESULT="SKIPPED"
-  append_report "FLINK-36864 probe skipped by chance gate (roll=${probe_roll}, chance=${FLINK36864_PROBE_CHANCE_FIXED})"
-fi
-
 step_timer_end
 
 append_report ""
@@ -1584,7 +1543,7 @@ append_report ""
 append_report "[Step 4] DML phase: generate and execute on source, verify on sink"
 step_timer_start "Step 4 DML phase"
 
-"${PYTHON_BIN}" "${SCRIPT_DIR}/dml_generator.py" \
+"${PYTHON_BIN}" "${SCRIPT_DIR}/generators/dml_generator.py" \
   --count "${DML_COUNT}" \
   --seed "${BASE_SEED}" \
   $( [[ "${DML_COMPLEX_WHERE}" = "1" ]] && echo "--allow-complex-where" ) \
@@ -1626,7 +1585,7 @@ else
 fi
 
 if [[ "${ENABLE_SELECT_PHASE}" == "1" ]]; then
-  "${PYTHON_BIN}" "${SCRIPT_DIR}/select_generator.py" \
+  "${PYTHON_BIN}" "${SCRIPT_DIR}/generators/select_generator.py" \
     --count 10 \
     --seed "$((BASE_SEED + 7))" \
     --type all \
@@ -1638,7 +1597,7 @@ append_report ""
 append_report "[Step 5] DDL phase: generate ALTER statements and verify schema sync"
   step_timer_start "Step 5 DDL phase"
 
-"${PYTHON_BIN}" "${SCRIPT_DIR}/ddl_generator.py" \
+"${PYTHON_BIN}" "${SCRIPT_DIR}/generators/ddl_generator.py" \
   --count "${DDL_COUNT}" \
   --seed "$((BASE_SEED + 1))" \
   --type "${DDL_MODE}" \
@@ -1769,7 +1728,7 @@ for i in $(seq 1 "${MIXED_COUNT}"); do
     else
       # Fallback once with fresh schema to avoid stale-pool false failures.
       existing_cols=$(get_source_columns_csv)
-      fallback_stmt=$("${PYTHON_BIN}" "${SCRIPT_DIR}/ddl_generator.py" \
+      fallback_stmt=$("${PYTHON_BIN}" "${SCRIPT_DIR}/generators/ddl_generator.py" \
         --count 1 \
         --seed "$((BASE_SEED + 500000 + i))" \
         --type alter_mixed \
@@ -1867,7 +1826,7 @@ step_timer_start "Step 7 Unified schema type validation + PQS"
 
 if [[ "${SINK_SQL_ENABLED}" == "1" ]]; then
   set +e
-  "${PYTHON_BIN}" "${SCRIPT_DIR}/cdc_schema_pqs_validator.py" \
+  "${PYTHON_BIN}" "${SCRIPT_DIR}/validators/cdc_schema_pqs_validator.py" \
     --mysql-port "${MYSQL_PORT}" \
     --sink-port "${SINK_PORT}" \
     --database "${DATABASE}" \
@@ -1982,8 +1941,6 @@ else
 fi
 append_report "Column count (MySQL/${SINK_LABEL}): ${MYSQL_COL_COUNT}/${SINK_COL_COUNT}"
 append_report "Schema new columns synced (ok/fail): ${DDL_SYNC_OK}/${DDL_SYNC_FAIL}"
-append_report "FLINK-36864 probe status: ${FLINK36864_PROBE_RESULT}"
-append_report "FLINK-36864 probe log: ${FLINK36864_PROBE_LOG}"
 append_report "Final Flink job state: ${FINAL_JOB_STATE}"
 
 write_experiment_archive

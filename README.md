@@ -2,7 +2,9 @@
 
 [![Stars](https://img.shields.io/github/stars/Terialion/sqlancer_cdc?style=social)](https://github.com/Terialion/sqlancer_cdc/stargazers) [![License](https://img.shields.io/github/license/Terialion/sqlancer_cdc)](https://github.com/Terialion/sqlancer_cdc/blob/master/LICENSE)
 
-轻量说明：本模块包含针对 CDC（Change Data Capture）场景的端到端（E2E）试验与验证脚本、pipeline 定义以及一个用于自动准备运行镜像/配置的 `pull_images.py` 工具。旨在帮助开发者在本地或 CI 中快速复现 CDC 行为与兼容性问题。
+轻量说明：本模块包含针对 CDC（Change Data Capture）场景的端到端（E2E）试验与验证脚本、pipeline 定义以及一个用于自动准备运行镜像/配置的 `tools/pull_images.py` 工具。旨在帮助开发者在本地或 CI 中快速复现 CDC 行为与兼容性问题。
+
+目录已按“高星仓库常见模式”重整：文档、探针、生成器、校验器分目录存放，脚本统一使用真实子目录路径。
 
 目录（快速导航）
 - 简介 / Quick Start
@@ -15,13 +17,28 @@
 
 ## 简介 / TL;DR
 
+推荐目录结构（当前）：
+
+```text
+sqlancer_cdc/
+├── docs/                   # 设计说明、决策文档
+├── probes/                 # Bug/行为探针脚本
+├── generators/             # SQL 生成器（DDL/DML/SELECT）
+├── validators/             # 一致性与 schema 校验器
+├── tools/                  # 工具脚本（如 pull_images）
+├── run_sqlancer_cdc_e2e.sh # 主入口
+├── cdcup.sh                # 环境入口
+├── pipeline-definition*.yaml
+└── docker-compose.yaml
+```
+
 快速运行（最小示例）：
 
 ```bash
-cd /sqlancer_cdc
+cd /home/wyh/flink-cdc/tools/cdcup/sqlancer_cdc
 
 # 准备镜像与运行时依赖（交互式）
-python3 pull_images.py
+python3 tools/pull_images.py
 
 # 启动服务
 ./cdcup up
@@ -40,19 +57,19 @@ docker compose -f docker-compose.yaml up -d
 
 ## 一步部署说明（推荐顺序）
 
-1. 准备镜像与依赖：使用 `pull_images.py`（推荐）
+1. 准备镜像与依赖：使用 `tools/pull_images.py`（推荐）
 
 交互式（按提示选择）：
 
 ```bash
-cd playbook_bundle/sqlancer_cdc
-python3 pull_images.py
+cd /home/wyh/flink-cdc/tools/cdcup/sqlancer_cdc
+python3 tools/pull_images.py
 ```
 
 批量模式（非交互）：
 
 ```bash
-python3 pull_images.py \
+python3 tools/pull_images.py \
   --batch \
   --mode quick \
   --source-type mysql \
@@ -77,11 +94,11 @@ docker compose -f docker-compose.yaml ps
 3. 运行 E2E 流程
 
 ```bash
-cd playbook_bundle/sqlancer_cdc
+cd /home/wyh/flink-cdc/tools/cdcup/sqlancer_cdc
 ./run_sqlancer_cdc_e2e.sh --pipeline-yaml pipeline-definition-doris.yaml --sink-type doris
 ```
 
-## `pull_images.py` 快速参考
+## `tools/pull_images.py` 快速参考
 
 功能：自动生成/拉取用于 CDC E2E 的 docker-compose、下载所需 connector/jar、并可导出到指定目录。
 
@@ -97,7 +114,7 @@ cd playbook_bundle/sqlancer_cdc
 示例（批量）：
 
 ```bash
-python3 pull_images.py --batch --mode quick --source-type mysql --sink-type doris \
+python3 tools/pull_images.py --batch --mode quick --source-type mysql --sink-type doris \
   --cdc-version 3.2.1 --project-name cdcup --output-dir /tmp/pull_images_run --target-dir /tmp/pull_images_cdc
 ```
 

@@ -62,7 +62,7 @@ echo "[INFO] 表已创建"
 echo "[2/5] 生成和执行 $DML_COUNT 条 DML 语句..."
 
 DML_SQL="/tmp/select_verify_dml_${DML_SEED}.sql"
-python "$SCRIPT_DIR/dml_generator.py" --count "$DML_COUNT" --seed "$DML_SEED" --output-sql "$DML_SQL"
+python "$SCRIPT_DIR/generators/dml_generator.py" --count "$DML_COUNT" --seed "$DML_SEED" --output-sql "$DML_SQL"
 
 EXEC_SUCCESS=0
 EXEC_FAILED=0
@@ -87,7 +87,7 @@ sleep "$WAIT_SYNC"
 echo "[4/5] 生成验证查询..."
 
 SELECT_QUERIES="/tmp/select_verify_queries_${DML_SEED}.sql"
-python "$SCRIPT_DIR/select_generator.py" --count 5 --seed "$DML_SEED" --output-sql "$SELECT_QUERIES"
+python "$SCRIPT_DIR/generators/select_generator.py" --count 5 --seed "$DML_SEED" --output-sql "$SELECT_QUERIES"
 
 # ========== Step 5: 执行 SELECT 并比较结果 ==========
 echo "[5/5] 对比 source vs sink 的 SELECT 结果..."

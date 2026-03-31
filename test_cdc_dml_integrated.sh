@@ -70,7 +70,7 @@ echo "[3/6] 生成 $DML_COUNT 条 DML 语句 (seed=$DML_SEED)..."
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 DML_SQL_FILE="$OUTPUT_DIR/dml_statements_seed_${DML_SEED}.sql"
 
-python "$SCRIPT_DIR/dml_generator.py" \
+python "$SCRIPT_DIR/generators/dml_generator.py" \
     --count "$DML_COUNT" \
     --seed "$DML_SEED" \
     --output-sql "$DML_SQL_FILE"
