@@ -2,6 +2,80 @@
 
 This folder is prepared for direct upload to a GitHub repository.
 
+## 快速开始 / Quick Start
+
+快速三步在本仓库启动并运行实用脚本（面向想快速复现 E2E 的用户）：
+
+- **先决条件**: 安装 `docker`、`docker compose`（v2 + 推荐）、`python3`、`git`。
+- **推荐工作目录**: `playbook_bundle/sqlancer_cdc`。
+
+1) 准备镜像与运行时依赖（推荐，使用 `pull_images.py` 自动化）
+
+```bash
+cd /home/wyh/flink-cdc/tools/cdcup/playbook_bundle/sqlancer_cdc
+
+# 交互式：按提示选择镜像/CDC 版本/Source/Sink
+python3 pull_images.py
+
+# 批量模式（无交互），示例：
+python3 pull_images.py \
+	--batch \
+	--mode quick \
+	--source-type mysql \
+	--sink-type doris \
+	--cdc-version 3.2.1 \
+	--project-name cdcup \
+	--output-dir /tmp/pull_images_batch_run \
+	--target-dir /tmp/pull_images_batch_cdc
+```
+
+提示:
+- 使用 `--skip-image-pull` 仅生成配置而不拉镜像。
+- 使用 `--skip-download-cdc` 当 `cdc/lib` 已由你提前准备时跳过下载。
+
+2) 启动 Compose 服务
+
+```bash
+# 在生成或包含 docker-compose.yaml 的目录下运行
+./cdcup up
+
+# 查看状态
+docker compose ps
+```
+
+3) 运行 E2E 流程（示例：使用 Doris pipeline）
+
+```bash
+cd /home/wyh/flink-cdc/tools/cdcup/playbook_bundle/sqlancer_cdc
+
+# 最小示例：使用指定 pipeline yaml 和 sink
+./run_sqlancer_cdc_e2e.sh --pipeline-yaml pipeline-definition-doris.yaml --sink-type doris
+
+# 可选：快速可重现示例
+./run_sqlancer_cdc_e2e.sh \
+	--pipeline-yaml pipeline-definition-doris.yaml \
+	--sink-type doris \
+	--base-seed 111 \
+	--dml-count 20 \
+	--ddl-count 5 \
+	--mixed-count 10
+```
+
+常用参数速览（摘要，更多可用参数见 `./run_sqlancer_cdc_e2e.sh -h`）:
+- `--pipeline-yaml <file>` : 指定 pipeline 定义文件（例如 `pipeline-definition-doris.yaml`）。
+- `--sink-type <doris|starrocks|paimon|...>` : 指定 sink 类型。
+- `--base-seed <int>` : 设置随机种子以便可重现。
+- `--dml-count / --ddl-count / --mixed-count` : 数据/DDL/混合语句数量。
+- `--enable-pqs-presence-probe` : 在结束时运行 PQS 存在性探针。
+- `--random-transform`：启用随机 transform 路径（用于变换路径验证）。
+
+故障排查快速提示：
+- 检查 `docker compose ps` 是否所有容器均启动正常。
+- 查看运行日志（JobManager / TaskManager / sink 日志），以及脚本产出的 `REPORT_DIR` 下的 `experiment_archive.txt` 和报告文件。
+- 若遇依赖缺失，确认 `cdc/lib` 已包含所需 connector/JDBC/Hadoop jars，或使用 `pull_images.py` 自动下载。
+
+以上步骤以最小操作说明为主，已覆盖常用快速复现场景。
+
 ## Included Scope
 - Playbook document
 - End-to-end runner
