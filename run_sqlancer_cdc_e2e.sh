@@ -26,6 +26,7 @@ fi
 source "${SINK_PROFILES_SH}"
 
 PIPELINE_YAML="${PIPELINE_YAML:-pipeline-definition.yaml}"
+SOURCE_TYPE="${SOURCE_TYPE:-auto}"
 DATABASE="${DATABASE:-database0}"
 TABLE="${TABLE:-t0}"
 SINK_TYPE="${SINK_TYPE:-auto}"
@@ -42,16 +43,26 @@ FLINK36741_MAIN_TRANSFORM="${FLINK36741_MAIN_TRANSFORM:-0}"
 PIPELINE_PATCH_SCRIPT="${PIPELINE_PATCH_SCRIPT:-}"
 TRANSFORM_SOURCE_TABLE="${TRANSFORM_SOURCE_TABLE:-}"
 TRANSFORM_PROJECTION="${TRANSFORM_PROJECTION:-}"
+TRANSFORM_PROJECTION_MODE="${TRANSFORM_PROJECTION_MODE:-expand-all}"
 TRANSFORM_FILTER="${TRANSFORM_FILTER:-}"
 ENABLE_RANDOM_TRANSFORM="${ENABLE_RANDOM_TRANSFORM:-0}"
 RANDOM_TRANSFORM_SEED="${RANDOM_TRANSFORM_SEED:-}"
 TRANSFORM_EXPECTS_ROW_PARITY="${TRANSFORM_EXPECTS_ROW_PARITY:-auto}"
 ENABLE_PQS_PRESENCE_PROBE="${ENABLE_PQS_PRESENCE_PROBE:-0}"
+FORCE_DISABLE_TRANSFORM="${FORCE_DISABLE_TRANSFORM:-0}"
+# Keep prophecy probe always on to broaden default coverage each run.
+ENABLE_TRANSFORM_PROPHECY_PROBE="1"
+TRANSFORM_PROPHECY_STRICT="${TRANSFORM_PROPHECY_STRICT:-0}"
 TEST_FOCUS="${TEST_FOCUS:-default}"
+BUG_CAMPAIGN_MODE="${BUG_CAMPAIGN_MODE:-off}"
+BUG_CAMPAIGN_RANDOM_RATE="${BUG_CAMPAIGN_RANDOM_RATE:-45}"
+BUG_CAMPAIGN_PROFILES="${BUG_CAMPAIGN_PROFILES:-bug36866,transform,timezone,schema}"
+BUG_CAMPAIGN_FORCE_FOCUS="${BUG_CAMPAIGN_FORCE_FOCUS:-bug36866}"
 FOCUS_TIME_ZONE="${FOCUS_TIME_ZONE:-Asia/Shanghai}"
 FOCUS_TRANSFORM_MODE="0"
 FOCUS_TIMEZONE_MODE="0"
 FOCUS_SCHEMA_MODE="0"
+FOCUS_36866_MODE="0"
 ENABLE_TIME_COLUMNS="${ENABLE_TIME_COLUMNS:-0}"
 PQS_CLEAN_RESTART="${PQS_CLEAN_RESTART:-0}"
 PQS_WAIT_SECONDS="${PQS_WAIT_SECONDS:-1}"
@@ -77,17 +88,29 @@ MIXED_DDL_RATIO="${MIXED_DDL_RATIO:-35}"
 MIX_DML_POOL_REFILL_SIZE="${MIX_DML_POOL_REFILL_SIZE:-15}"
 MIX_DDL_POOL_REFILL_SIZE="${MIX_DDL_POOL_REFILL_SIZE:-8}"
 DDL_SYNC_TIMEOUT="${DDL_SYNC_TIMEOUT:-60}"
+MIX_DDL_SYNC_TIMEOUT="${MIX_DDL_SYNC_TIMEOUT:-10}"
+COLUMN_SYNC_STABLE_WINDOW="${COLUMN_SYNC_STABLE_WINDOW:-5}"
+ROW_CONVERGE_RETRIES="${ROW_CONVERGE_RETRIES:-16}"
 BASE_SEED="${BASE_SEED:-42}"
 REPORT_DIR_FROM_ENV="${REPORT_DIR:-}"
 REPORT_DIR="${REPORT_DIR:-/tmp/cdc_sqlancer_${BASE_SEED}}"
 CANCEL_OLD_JOBS="${CANCEL_OLD_JOBS:-1}"
 AUTO_RECOVER_CONTAINERS="${AUTO_RECOVER_CONTAINERS:-1}"
+AUTO_RESOURCE_RECOVERY_RETRIES="${AUTO_RESOURCE_RECOVERY_RETRIES:-2}"
+AUTO_RESOURCE_RECOVERY_DELAY="${AUTO_RESOURCE_RECOVERY_DELAY:-3}"
+AUTO_RESOURCE_RECOVERY_POST_WAIT="${AUTO_RESOURCE_RECOVERY_POST_WAIT:-8}"
+BATCH_EXCLUDE_NORESOURCE_ROUNDS="${BATCH_EXCLUDE_NORESOURCE_ROUNDS:-1}"
+BATCH_HEALTH_MIN_SUCCESS_ROUNDS="${BATCH_HEALTH_MIN_SUCCESS_ROUNDS:-1}"
 ROUNDS="${ROUNDS:-1}"
 SEED_STEP="${SEED_STEP:-1}"
+BATCH_ROUND_INDEX="${BATCH_ROUND_INDEX:-1}"
+BATCH_ROUND1_EXTRA_SYNC_WAIT="${BATCH_ROUND1_EXTRA_SYNC_WAIT:-20}"
+BATCH_ROUND1_EXTRA_SCHEMA_SYNC_TIMEOUT="${BATCH_ROUND1_EXTRA_SCHEMA_SYNC_TIMEOUT:-20}"
 SUMMARY_FILE_FROM_ENV="${SUMMARY_FILE:-}"
 SUMMARY_FILE="${SUMMARY_FILE:-/tmp/cdc_sqlancer_batch_${BASE_SEED}.txt}"
 IN_BATCH_MODE="${IN_BATCH_MODE:-0}"
 SELF_SCRIPT="${SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"
+TRANSFORM_ADVISOR_SCRIPT="${SCRIPT_DIR}/tools/transform_support_advisor.py"
 
 print_usage() {
   cat <<EOF
@@ -96,6 +119,7 @@ Usage: ./run_sqlancer_cdc_e2e.sh [options]
 Options:
   -h, --help                    Show this help and exit
   --pipeline-yaml PATH          Pipeline yaml file (default: ${PIPELINE_YAML})
+  --source-type TYPE            Source type override, e.g. mysql/postgres (default: ${SOURCE_TYPE})
   --sink-type TYPE              Sink type, e.g. doris/paimon/kafka (default: ${SINK_TYPE})
   --base-seed N                 Base random seed (default: ${BASE_SEED})
   --rounds N                    Batch rounds (default: ${ROUNDS})
@@ -109,11 +133,20 @@ Options:
   --pipeline-patch-script PATH  External script to patch pipeline yaml before submit
   --transform-source-table TBL  Built-in transform source table regex (default: DATABASE\\.TABLE$)
   --transform-projection EXPR   Built-in transform projection expression
+  --transform-projection-mode M Transform projection mode: strict|expand-all (default: ${TRANSFORM_PROJECTION_MODE})
   --transform-filter EXPR       Built-in transform filter expression (optional)
   --random-transform            Auto-generate transform projection/filter by seed
+  --disable-transform           Force disable transform projection/filter/random/prophecy for baseline sync check
   --random-transform-seed N     Seed for random transform generation (default: base-seed+20000)
+  --enable-transform-prophecy-probe
+                                Inject one prophecy row and assert sink presence/absence under transform
+  --transform-prophecy-strict   Enable strict value parity check for prophecy row
   --enable-pqs-presence-probe   Run PQS absent->present probe at workflow end
-  --test-focus LIST             Focus profile list: transform,timezone,schema (comma-separated)
+  --test-focus LIST             Focus profile list: transform,timezone,schema,bug36866 (comma-separated)
+  --bug-campaign-mode MODE      Bug campaign mode: off|random|focus (default: ${BUG_CAMPAIGN_MODE})
+  --bug-campaign-random-rate N  Random focus activation rate [0-100] (default: ${BUG_CAMPAIGN_RANDOM_RATE})
+  --bug-campaign-profiles LIST  Candidate focus profiles for random mode (default: ${BUG_CAMPAIGN_PROFILES})
+  --bug-campaign-force-focus F  Fixed focus profile for focus mode (default: ${BUG_CAMPAIGN_FORCE_FOCUS})
   --focus-time-zone TZ          Time zone for timezone focus (default: ${FOCUS_TIME_ZONE})
 
 Examples:
@@ -138,6 +171,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --sink-type)
       SINK_TYPE="$2"
+      shift 2
+      ;;
+    --source-type)
+      SOURCE_TYPE="$2"
       shift 2
       ;;
     --base-seed)
@@ -189,6 +226,10 @@ while [[ $# -gt 0 ]]; do
       TRANSFORM_PROJECTION="$2"
       shift 2
       ;;
+    --transform-projection-mode)
+      TRANSFORM_PROJECTION_MODE="$2"
+      shift 2
+      ;;
     --transform-filter)
       TRANSFORM_FILTER="$2"
       shift 2
@@ -197,9 +238,21 @@ while [[ $# -gt 0 ]]; do
       ENABLE_RANDOM_TRANSFORM="1"
       shift
       ;;
+    --disable-transform)
+      FORCE_DISABLE_TRANSFORM="1"
+      shift
+      ;;
     --random-transform-seed)
       RANDOM_TRANSFORM_SEED="$2"
       shift 2
+      ;;
+    --enable-transform-prophecy-probe)
+      ENABLE_TRANSFORM_PROPHECY_PROBE="1"
+      shift
+      ;;
+    --transform-prophecy-strict)
+      TRANSFORM_PROPHECY_STRICT="1"
+      shift
       ;;
     --enable-pqs-presence-probe)
       ENABLE_PQS_PRESENCE_PROBE="1"
@@ -207,6 +260,22 @@ while [[ $# -gt 0 ]]; do
       ;;
     --test-focus)
       TEST_FOCUS="$2"
+      shift 2
+      ;;
+    --bug-campaign-mode)
+      BUG_CAMPAIGN_MODE="$2"
+      shift 2
+      ;;
+    --bug-campaign-random-rate)
+      BUG_CAMPAIGN_RANDOM_RATE="$2"
+      shift 2
+      ;;
+    --bug-campaign-profiles)
+      BUG_CAMPAIGN_PROFILES="$2"
+      shift 2
+      ;;
+    --bug-campaign-force-focus)
+      BUG_CAMPAIGN_FORCE_FOCUS="$2"
       shift 2
       ;;
     --focus-time-zone)
@@ -235,6 +304,7 @@ configure_test_focus() {
   FOCUS_TRANSFORM_MODE="0"
   FOCUS_TIMEZONE_MODE="0"
   FOCUS_SCHEMA_MODE="0"
+  FOCUS_36866_MODE="0"
 
   if [[ "${normalized}" == "default" || -z "${normalized}" ]]; then
     return 0
@@ -248,6 +318,9 @@ configure_test_focus() {
   fi
   if echo "${normalized}" | tr ',' '\n' | grep -Fxq "schema"; then
     FOCUS_SCHEMA_MODE="1"
+  fi
+  if echo "${normalized}" | tr ',' '\n' | grep -Fxq "bug36866"; then
+    FOCUS_36866_MODE="1"
   fi
 
   if [[ "${FOCUS_TRANSFORM_MODE}" == "1" ]]; then
@@ -268,6 +341,84 @@ configure_test_focus() {
   if [[ "${FOCUS_SCHEMA_MODE}" == "1" ]]; then
     (( DDL_COUNT < 16 )) && DDL_COUNT=16
     (( MIXED_DDL_RATIO < 40 )) && MIXED_DDL_RATIO=40
+  fi
+  if [[ "${FOCUS_36866_MODE}" == "1" ]]; then
+    if [[ "${TABLE}" == "t0" ]]; then
+      TABLE="t0_focus_36866_${BASE_SEED}"
+    fi
+    ENABLE_RANDOM_TRANSFORM="0"
+    TRANSFORM_SOURCE_TABLE="${DATABASE}.${TABLE}"
+    TRANSFORM_PROJECTION="c0, CAST(ROUND(c4,0) AS INT) as c4_int_probe, CHAR_LENGTH(c3) as c3_len_probe"
+    TRANSFORM_FILTER=""
+    TRANSFORM_EXPECTS_ROW_PARITY="0"
+    AGGRESSIVE_BUG_TRIGGER="1"
+    ENABLE_PQS_PRESENCE_PROBE="1"
+  fi
+}
+
+pick_campaign_focus_by_seed() {
+  local seed="$1"
+  local profiles_norm
+  local rate
+  local trigger
+  local profiles=()
+  local count
+  local index
+  local mode
+
+  mode=$(echo "${BUG_CAMPAIGN_MODE}" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
+  case "${mode}" in
+    off|"")
+      echo "${TEST_FOCUS}"
+      return 0
+      ;;
+    focus)
+      echo "${BUG_CAMPAIGN_FORCE_FOCUS}"
+      return 0
+      ;;
+    random)
+      ;;
+    *)
+      echo "${TEST_FOCUS}"
+      return 0
+      ;;
+  esac
+
+  rate="${BUG_CAMPAIGN_RANDOM_RATE}"
+  if ! [[ "${rate}" =~ ^[0-9]+$ ]]; then
+    rate=45
+  fi
+  (( rate < 0 )) && rate=0
+  (( rate > 100 )) && rate=100
+
+  trigger=$((seed % 100))
+  if (( trigger >= rate )); then
+    echo "default"
+    return 0
+  fi
+
+  profiles_norm=$(echo "${BUG_CAMPAIGN_PROFILES}" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
+  IFS=',' read -r -a profiles <<< "${profiles_norm}"
+  count=${#profiles[@]}
+  if (( count == 0 )); then
+    echo "default"
+    return 0
+  fi
+
+  index=$(((seed / 7 + 3) % count))
+  if [[ -z "${profiles[$index]}" ]]; then
+    echo "default"
+    return 0
+  fi
+  echo "${profiles[$index]}"
+}
+
+resolve_campaign_focus_once() {
+  local selected
+
+  selected=$(pick_campaign_focus_by_seed "${BASE_SEED}")
+  if [[ -n "${selected}" ]]; then
+    TEST_FOCUS="${selected}"
   fi
 }
 
@@ -333,6 +484,7 @@ pin_source_tables_in_pipeline() {
   ' "${input_yaml}" > "${output_yaml}"
 }
 
+resolve_campaign_focus_once
 configure_test_focus
 
 mkdir -p "${REPORT_DIR}"
@@ -340,6 +492,8 @@ REPORT_FILE="${REPORT_DIR}/source_sink_final_state.txt"
 PIPELINE_LOG="${REPORT_DIR}/pipeline_submit.log"
 RUNTIME_PIPELINE_YAML="${REPORT_DIR}/pipeline_mainflow_flink36741.yaml"
 RUNTIME_PIPELINE_TZ_YAML="${REPORT_DIR}/pipeline_mainflow_timezone.yaml"
+SUBMITTED_PIPELINE_ARCHIVE="${REPORT_DIR}/submitted_pipeline.yaml"
+SUBMITTED_TRANSFORM_SECTION="${REPORT_DIR}/submitted_pipeline.transform.txt"
 DML_SQL="${REPORT_DIR}/phase_dml.sql"
 DDL_SQL="${REPORT_DIR}/phase_ddl.sql"
 SELECT_SQL="${REPORT_DIR}/phase_select.sql"
@@ -352,11 +506,20 @@ SCHEMA_PQS_SLEEP_SECONDS="${SCHEMA_PQS_SLEEP_SECONDS:-5}"
 SCHEMA_PQS_TRIALS="${SCHEMA_PQS_TRIALS:-3}"
 SCHEMA_PQS_RETRIES="${SCHEMA_PQS_RETRIES:-5}"
 SCHEMA_PQS_RETRY_DELAY="${SCHEMA_PQS_RETRY_DELAY:-1}"
+TRANSFORM_PROPHECY_WAIT_SECONDS="${TRANSFORM_PROPHECY_WAIT_SECONDS:-10}"
+TRANSFORM_PROPHECY_ROWS="${TRANSFORM_PROPHECY_ROWS:-3}"
+TRANSFORM_PROPHECY_SAMPLE_MAX="${TRANSFORM_PROPHECY_SAMPLE_MAX:-3}"
+TRANSFORM_PROPHECY_EDGE_CASES="${TRANSFORM_PROPHECY_EDGE_CASES:-2}"
+TRANSFORM_PROPHECY_EXTRA_TRIES_MAX="${TRANSFORM_PROPHECY_EXTRA_TRIES_MAX:-2}"
+
+PROPHECY_INITIALIZED="0"
+declare -a PROPHECY_CASES
+PROPHECY_EVIDENCE_LOG=""
 
 EFFECTIVE_WAIT_SYNC="${WAIT_SYNC}"
 EFFECTIVE_WAIT_TABLE_TIMEOUT="${WAIT_TABLE_TIMEOUT}"
 EFFECTIVE_DDL_SYNC_TIMEOUT="${DDL_SYNC_TIMEOUT}"
-ROW_CONVERGE_RETRIES="90"
+EFFECTIVE_MIX_DDL_SYNC_TIMEOUT="${MIX_DDL_SYNC_TIMEOUT}"
 SINK_SQL_RETRY_COUNT="${SINK_SQL_RETRY_COUNT:-8}"
 SINK_SQL_RETRY_DELAY="${SINK_SQL_RETRY_DELAY:-1}"
 RANDOM_TRANSFORM_SEED_EFFECTIVE=""
@@ -369,9 +532,14 @@ if [[ "${EFFECTIVE_WAIT_TABLE_TIMEOUT}" -gt 90 ]]; then
   EFFECTIVE_WAIT_TABLE_TIMEOUT="45"
 fi
 if [[ "${EFFECTIVE_DDL_SYNC_TIMEOUT}" -gt 45 ]]; then
-  EFFECTIVE_DDL_SYNC_TIMEOUT="20"
+  EFFECTIVE_DDL_SYNC_TIMEOUT="15"
 fi
-ROW_CONVERGE_RETRIES="20"
+if [[ "${EFFECTIVE_MIX_DDL_SYNC_TIMEOUT}" -gt 20 ]]; then
+  EFFECTIVE_MIX_DDL_SYNC_TIMEOUT="8"
+fi
+if [[ "${ROW_CONVERGE_RETRIES}" -gt 40 ]]; then
+  ROW_CONVERGE_RETRIES="24"
+fi
 if [[ "${STATUS_ROW_SAMPLE_EVERY}" -lt 60 ]]; then
   STATUS_ROW_SAMPLE_EVERY="60"
 fi
@@ -402,13 +570,139 @@ detect_sink_type_from_yaml() {
   ' "${yaml_path}" | tr -d "\"'"
 }
 
+detect_source_type_from_yaml() {
+  local yaml_path="$1"
+  awk '
+    /^source:[[:space:]]*$/ { in_source=1; next }
+    in_source && /^[^[:space:]]/ { in_source=0 }
+    in_source && $1 == "type:" { print $2; exit }
+  ' "${yaml_path}" | tr -d "\"'"
+}
+
+resolve_yaml_path() {
+  local yaml_path="$1"
+  if [[ -f "${yaml_path}" ]]; then
+    printf '%s\n' "${yaml_path}"
+    return 0
+  fi
+  if [[ -f "${SCRIPT_DIR}/${yaml_path}" ]]; then
+    printf '%s\n' "${SCRIPT_DIR}/${yaml_path}"
+    return 0
+  fi
+  return 1
+}
+
+extract_transform_section() {
+  local yaml_path="$1"
+  local out_path="$2"
+  awk '
+    BEGIN { in_transform=0; found=0 }
+    {
+      if ($0 ~ /^transform:[[:space:]]*$/) {
+        in_transform=1
+        found=1
+        print
+        next
+      }
+      if (in_transform==1) {
+        if ($0 ~ /^[^[:space:]].*:[[:space:]]*$/) {
+          in_transform=0
+          exit
+        }
+        print
+      }
+    }
+    END {
+      if (found==0) {
+        print "<no transform section in submitted pipeline>"
+      }
+    }
+  ' "${yaml_path}" > "${out_path}"
+}
+
+archive_and_report_submitted_pipeline() {
+  local submit_yaml="$1"
+  local resolved
+
+  resolved=$(resolve_yaml_path "${submit_yaml}" || true)
+  if [[ -z "${resolved}" ]]; then
+    append_report "WARN: cannot resolve submitted pipeline path: ${submit_yaml}"
+    return 1
+  fi
+
+  cp "${resolved}" "${SUBMITTED_PIPELINE_ARCHIVE}"
+  extract_transform_section "${SUBMITTED_PIPELINE_ARCHIVE}" "${SUBMITTED_TRANSFORM_SECTION}"
+
+  append_report "Submitted pipeline archive: ${SUBMITTED_PIPELINE_ARCHIVE}"
+  append_report "Submitted transform section: ${SUBMITTED_TRANSFORM_SECTION}"
+  append_report "--- Submitted transform section ---"
+  cat "${SUBMITTED_TRANSFORM_SECTION}" | tee -a "${REPORT_FILE}"
+  append_report "--- End submitted transform section ---"
+}
+
+report_transform_support_advice() {
+  local source_type="$1"
+  local sink_type="$2"
+  local projection="$3"
+  local filter_expr="$4"
+
+  if [[ ! -f "${TRANSFORM_ADVISOR_SCRIPT}" ]]; then
+    return 0
+  fi
+
+  set +e
+  local advice
+  advice=$("${PYTHON_BIN}" "${TRANSFORM_ADVISOR_SCRIPT}" \
+    --source-type "${source_type}" \
+    --sink-type "${sink_type}" \
+    --projection "${projection}" \
+    --filter "${filter_expr}" 2>/dev/null)
+  local rc=$?
+  set -e
+
+  if [[ ${rc} -eq 0 && -n "${advice}" ]]; then
+    append_report "--- Transform support advisor ---"
+    printf '%s\n' "${advice}" | tee -a "${REPORT_FILE}"
+    append_report "--- End transform support advisor ---"
+  fi
+}
+
+normalize_projection_expand_all() {
+  local projection_expr="$1"
+  "${PYTHON_BIN}" - <<'PY' "${projection_expr}"
+import sys
+
+expr = sys.argv[1] if len(sys.argv) > 1 else ""
+parts = [p.strip() for p in expr.split(",") if p.strip()]
+base = {"c0", "c1", "c2", "c3", "c4", "*", "\\*"}
+kept = []
+for p in parts:
+  head = p.split()[0].lower()
+  if head in base:
+    continue
+  kept.append(p)
+
+if kept:
+  print("\\*, " + ", ".join(kept))
+else:
+  print("\\*")
+PY
+}
+
 configure_sink_runtime() {
   local detected
+  local source_detected
   detected="$(detect_sink_type_from_yaml "${SCRIPT_DIR}/${PIPELINE_YAML}")"
   if [[ "${SINK_TYPE}" == "auto" || -z "${SINK_TYPE}" ]]; then
     SINK_TYPE="${detected:-doris}"
   fi
   SINK_TYPE="$(echo "${SINK_TYPE}" | tr '[:upper:]' '[:lower:]')"
+
+  source_detected="$(detect_source_type_from_yaml "${SCRIPT_DIR}/${PIPELINE_YAML}")"
+  if [[ "${SOURCE_TYPE}" == "auto" || -z "${SOURCE_TYPE}" ]]; then
+    SOURCE_TYPE="${source_detected:-mysql}"
+  fi
+  SOURCE_TYPE="$(echo "${SOURCE_TYPE}" | tr '[:upper:]' '[:lower:]')"
 
   if ! resolve_sink_profile "${SINK_TYPE}"; then
     log "ERROR: Unsupported sink type: ${SINK_TYPE}"
@@ -438,7 +732,7 @@ generate_random_transform() {
   RANDOM_TRANSFORM_SEED_EFFECTIVE="${seed}"
 
   RANDOM="${seed}"
-  projection_pick=$((RANDOM % 5))
+  projection_pick=$((RANDOM % 16))
   filter_pick=$((RANDOM % 5))
 
   case "${projection_pick}" in
@@ -447,6 +741,17 @@ generate_random_transform() {
     2) TRANSFORM_PROJECTION="c0, c4, c0 as pivot_key" ;;
     3) TRANSFORM_PROJECTION="c0, c4, c0 + 1 as c0_plus" ;;
     4) TRANSFORM_PROJECTION="c0, c4, ABS(c0) as c0_abs" ;;
+    5) TRANSFORM_PROJECTION="c0, c4, CHAR_LENGTH(c3) as c3_len_probe" ;;
+    6) TRANSFORM_PROJECTION="c0, c4, CHAR_LENGTH(c1) as c1_len_probe" ;;
+    7) TRANSFORM_PROJECTION="c0, c4, CAST(ROUND(c4,0) AS INT) as c4_int_probe" ;;
+    8) TRANSFORM_PROJECTION="c0, c4, ROUND(c4, 2) as c4_round2" ;;
+    9) TRANSFORM_PROJECTION="c0, c4, FLOOR(c4) as c4_floor" ;;
+    10) TRANSFORM_PROJECTION="c0, c4, UPPER(c3) as c3_upper" ;;
+    11) TRANSFORM_PROJECTION="c0, c4, UPPER(c3) as c3_upper, CHAR_LENGTH(c3) as c3_len_probe" ;;
+    12) TRANSFORM_PROJECTION="c0, c4, UPPER(COALESCE(c3, '')) as c3_upper_safe" ;;
+    13) TRANSFORM_PROJECTION="c0, c4, CONCAT(c1, '_suffix') as c1_tagged" ;;
+    14) TRANSFORM_PROJECTION="c0, c4, COALESCE(c3, 'missing') as c3_filled" ;;
+    15) TRANSFORM_PROJECTION="c0, c4, CASE WHEN c0 >= 0 THEN c0 ELSE 0 - c0 END as c0_abs_case" ;;
   esac
 
   case "${filter_pick}" in
@@ -463,6 +768,18 @@ generate_random_transform() {
 }
 
 prepare_transform_runtime_flags() {
+  if [[ "${FORCE_DISABLE_TRANSFORM}" == "1" ]]; then
+    ENABLE_RANDOM_TRANSFORM="0"
+    FLINK36741_MAIN_TRANSFORM="0"
+    TRANSFORM_PROJECTION=""
+    TRANSFORM_FILTER=""
+    ENABLE_TRANSFORM_PROPHECY_PROBE="0"
+    ENABLE_PQS_PRESENCE_PROBE="0"
+    TRANSFORM_EXPECTS_ROW_PARITY="1"
+    append_report "Transform mode: force disabled by --disable-transform"
+    return 0
+  fi
+
   if [[ "${ENABLE_RANDOM_TRANSFORM}" == "1" && -z "${TRANSFORM_PROJECTION}" ]]; then
     generate_random_transform
     append_report "Random transform mode: enabled"
@@ -475,6 +792,18 @@ prepare_transform_runtime_flags() {
     append_report "Random transform mode: auto-enabled PQS presence probe"
   fi
 
+  TRANSFORM_PROJECTION_MODE="$(echo "${TRANSFORM_PROJECTION_MODE}" | tr '[:upper:]' '[:lower:]' | tr -d ' ')"
+  if [[ "${TRANSFORM_PROJECTION_MODE}" != "strict" && "${TRANSFORM_PROJECTION_MODE}" != "expand-all" ]]; then
+    TRANSFORM_PROJECTION_MODE="expand-all"
+  fi
+
+  if [[ -n "${TRANSFORM_PROJECTION}" && "${TRANSFORM_PROJECTION_MODE}" == "expand-all" ]]; then
+    if ! echo "${TRANSFORM_PROJECTION}" | grep -Eq '[*]'; then
+      TRANSFORM_PROJECTION="$(normalize_projection_expand_all "${TRANSFORM_PROJECTION}")"
+      append_report "Transform projection mode: expand-all (wildcard + deduplicated extras)"
+    fi
+  fi
+
   if [[ "${TRANSFORM_EXPECTS_ROW_PARITY}" == "auto" ]]; then
     if [[ -n "${TRANSFORM_FILTER}" ]]; then
       TRANSFORM_EXPECTS_ROW_PARITY="0"
@@ -482,6 +811,276 @@ prepare_transform_runtime_flags() {
       TRANSFORM_EXPECTS_ROW_PARITY="1"
     fi
   fi
+}
+
+init_transform_prophecy_row() {
+  if [[ "${ENABLE_TRANSFORM_PROPHECY_PROBE}" != "1" ]]; then
+    return 0
+  fi
+
+  local seed
+  local i
+  local extra_tries
+  local expected
+  local match_count
+  local prophecy_c0
+  local prophecy_c1
+  local prophecy_c2
+  local prophecy_c3
+  local prophecy_c4
+  local prophecy_c4_raw
+  local seen_present
+  local seen_absent
+  local edge_idx
+  local edge_slot
+  local sample_max
+  local sample_count
+  local pool_size
+  local pick_idx
+  local case_line
+  local sampled_cases=()
+  local pool_cases=()
+  local log_idx
+  local edge_c4
+  local edge_c3
+
+  seed=$((BASE_SEED + 910000))
+  RANDOM="${seed}"
+  PROPHECY_CASES=()
+  seen_present=0
+  seen_absent=0
+  PROPHECY_EVIDENCE_LOG="${REPORT_DIR}/transform_prophecy_evidence.log"
+  : > "${PROPHECY_EVIDENCE_LOG}"
+
+  for i in $(seq 1 "${TRANSFORM_PROPHECY_ROWS}"); do
+    prophecy_c0=$((100000000 + (RANDOM % 1000000) + i))
+    prophecy_c1="prophecy_${BASE_SEED}_${prophecy_c0}"
+    prophecy_c2=$((RANDOM % 2000 - 1000))
+    prophecy_c3="oracle_${RANDOM}"
+    prophecy_c4_raw=$((RANDOM % 100000))
+    prophecy_c4=$(printf '%d.%02d' "$((prophecy_c4_raw / 100))" "$((prophecy_c4_raw % 100))")
+
+    mysql -h 127.0.0.1 -P "${MYSQL_PORT}" -u root "${DATABASE}" -e "
+INSERT INTO ${TABLE} (c0, c1, c2, c3, c4)
+VALUES (${prophecy_c0}, '${prophecy_c1}', ${prophecy_c2}, '${prophecy_c3}', ${prophecy_c4})
+ON DUPLICATE KEY UPDATE c1=VALUES(c1), c2=VALUES(c2), c3=VALUES(c3), c4=VALUES(c4);
+" >/dev/null 2>&1
+
+    if [[ -n "${TRANSFORM_FILTER}" ]]; then
+      match_count=$(mysql -h 127.0.0.1 -P "${MYSQL_PORT}" -u root "${DATABASE}" -sN -e "
+SELECT COUNT(*) FROM ${TABLE} WHERE c0=${prophecy_c0} AND (${TRANSFORM_FILTER});
+" 2>/dev/null || echo "0")
+      if [[ "${match_count}" =~ ^[0-9]+$ ]] && [[ "${match_count}" -gt 0 ]]; then
+        expected="1"
+      else
+        expected="0"
+      fi
+    else
+      expected="1"
+    fi
+
+    if [[ "${expected}" == "1" ]]; then
+      seen_present=1
+    else
+      seen_absent=1
+    fi
+
+    PROPHECY_CASES+=("${prophecy_c0}|${expected}|${prophecy_c4}")
+  done
+
+  # Inject a small number of deterministic cast edge rows to widen bug-trigger surface.
+  for edge_idx in $(seq 1 "${TRANSFORM_PROPHECY_EDGE_CASES}"); do
+    edge_slot=$((((edge_idx - 1) % 4) + 1))
+    case "${edge_slot}" in
+      1)
+        edge_c4="21474836.47"
+        edge_c3="2147483647"
+        ;;
+      2)
+        edge_c4="-21474836.48"
+        edge_c3="-2147483648"
+        ;;
+      3)
+        edge_c4="99999.99"
+        edge_c3="2147483648"
+        ;;
+      *)
+        edge_c4="-99999.99"
+        edge_c3="-2147483649"
+        ;;
+    esac
+
+    prophecy_c0=$((120000000 + (RANDOM % 1000000) + edge_idx))
+    prophecy_c1="prophecy_edge_${BASE_SEED}_${prophecy_c0}"
+    prophecy_c2=$((RANDOM % 2000 - 1000))
+
+    mysql -h 127.0.0.1 -P "${MYSQL_PORT}" -u root "${DATABASE}" -e "
+INSERT INTO ${TABLE} (c0, c1, c2, c3, c4)
+VALUES (${prophecy_c0}, '${prophecy_c1}', ${prophecy_c2}, '${edge_c3}', ${edge_c4})
+ON DUPLICATE KEY UPDATE c1=VALUES(c1), c2=VALUES(c2), c3=VALUES(c3), c4=VALUES(c4);
+" >/dev/null 2>&1
+
+    if [[ -n "${TRANSFORM_FILTER}" ]]; then
+      match_count=$(mysql -h 127.0.0.1 -P "${MYSQL_PORT}" -u root "${DATABASE}" -sN -e "
+SELECT COUNT(*) FROM ${TABLE} WHERE c0=${prophecy_c0} AND (${TRANSFORM_FILTER});
+" 2>/dev/null || echo "0")
+      if [[ "${match_count}" =~ ^[0-9]+$ ]] && [[ "${match_count}" -gt 0 ]]; then
+        expected="1"
+      else
+        expected="0"
+      fi
+    else
+      expected="1"
+    fi
+
+    if [[ "${expected}" == "1" ]]; then
+      seen_present=1
+    else
+      seen_absent=1
+    fi
+
+    PROPHECY_CASES+=("${prophecy_c0}|${expected}|${edge_c4}")
+  done
+
+  extra_tries=0
+  while [[ -n "${TRANSFORM_FILTER}" && ${extra_tries} -lt ${TRANSFORM_PROPHECY_EXTRA_TRIES_MAX} && ( ${seen_present} -eq 0 || ${seen_absent} -eq 0 ) ]]; do
+    extra_tries=$((extra_tries + 1))
+    prophecy_c0=$((110000000 + (RANDOM % 1000000) + extra_tries))
+    prophecy_c1="prophecy_ext_${BASE_SEED}_${prophecy_c0}"
+    prophecy_c2=$((RANDOM % 2000 - 1000))
+    prophecy_c3="oracle_ext_${RANDOM}"
+    prophecy_c4_raw=$((RANDOM % 100000))
+    prophecy_c4=$(printf '%d.%02d' "$((prophecy_c4_raw / 100))" "$((prophecy_c4_raw % 100))")
+
+    mysql -h 127.0.0.1 -P "${MYSQL_PORT}" -u root "${DATABASE}" -e "
+INSERT INTO ${TABLE} (c0, c1, c2, c3, c4)
+VALUES (${prophecy_c0}, '${prophecy_c1}', ${prophecy_c2}, '${prophecy_c3}', ${prophecy_c4})
+ON DUPLICATE KEY UPDATE c1=VALUES(c1), c2=VALUES(c2), c3=VALUES(c3), c4=VALUES(c4);
+" >/dev/null 2>&1
+
+    match_count=$(mysql -h 127.0.0.1 -P "${MYSQL_PORT}" -u root "${DATABASE}" -sN -e "
+SELECT COUNT(*) FROM ${TABLE} WHERE c0=${prophecy_c0} AND (${TRANSFORM_FILTER});
+" 2>/dev/null || echo "0")
+    if [[ "${match_count}" =~ ^[0-9]+$ ]] && [[ "${match_count}" -gt 0 ]]; then
+      expected="1"
+      seen_present=1
+    else
+      expected="0"
+      seen_absent=1
+    fi
+
+    PROPHECY_CASES+=("${prophecy_c0}|${expected}|${prophecy_c4}")
+  done
+
+  sample_max="${TRANSFORM_PROPHECY_SAMPLE_MAX}"
+  if ! [[ "${sample_max}" =~ ^[0-9]+$ ]] || [[ "${sample_max}" -le 0 ]]; then
+    sample_max=6
+  fi
+  sample_count=${#PROPHECY_CASES[@]}
+  if [[ ${sample_count} -gt ${sample_max} ]]; then
+    RANDOM=$((BASE_SEED + 930000))
+    pool_cases=("${PROPHECY_CASES[@]}")
+    sampled_cases=()
+    while [[ ${#sampled_cases[@]} -lt ${sample_max} && ${#pool_cases[@]} -gt 0 ]]; do
+      pool_size=${#pool_cases[@]}
+      pick_idx=$((RANDOM % pool_size))
+      sampled_cases+=("${pool_cases[${pick_idx}]}")
+      unset 'pool_cases[pick_idx]'
+      pool_cases=("${pool_cases[@]}")
+    done
+    PROPHECY_CASES=("${sampled_cases[@]}")
+  fi
+
+  log_idx=0
+  for case_line in "${PROPHECY_CASES[@]}"; do
+    log_idx=$((log_idx + 1))
+    IFS='|' read -r prophecy_c0 expected prophecy_c4 <<< "${case_line}"
+    append_report "Transform prophecy row[${log_idx}]: c0=${prophecy_c0}, expect_present=${expected}, c4=${prophecy_c4}"
+  done
+
+  PROPHECY_INITIALIZED="1"
+  append_report "Transform prophecy probe: enabled (cases=${#PROPHECY_CASES[@]}, sample_max=${sample_max})"
+}
+
+run_transform_prophecy_probe() {
+  if [[ "${ENABLE_TRANSFORM_PROPHECY_PROBE}" != "1" || "${PROPHECY_INITIALIZED}" != "1" ]]; then
+    return 0
+  fi
+
+  if [[ "${SINK_SQL_ENABLED}" != "1" ]]; then
+    append_report "Transform prophecy probe skipped: sink has no SQL endpoint"
+    return 0
+  fi
+
+  local sink_count
+  local retries
+  local case_line
+  local c0
+  local expected
+  local c4_expected
+  local src_v
+  local sink_v
+  local passed
+  local failed
+
+  retries="${TRANSFORM_PROPHECY_WAIT_SECONDS}"
+  passed=0
+  failed=0
+
+  for case_line in "${PROPHECY_CASES[@]}"; do
+    IFS='|' read -r c0 expected c4_expected <<< "${case_line}"
+
+    if [[ "${expected}" == "1" ]]; then
+      sink_count="0"
+      for _ in $(seq 1 "${retries}"); do
+        sink_count=$(sink_mysql_exec "${DATABASE}" -sN -e "SELECT COUNT(*) FROM ${TABLE} WHERE c0=${c0};" 2>/dev/null || echo "0")
+        if [[ "${sink_count}" =~ ^[0-9]+$ ]] && [[ "${sink_count}" -gt 0 ]]; then
+          break
+        fi
+        sleep 1
+      done
+
+      if [[ ! "${sink_count}" =~ ^[0-9]+$ ]] || [[ "${sink_count}" -eq 0 ]]; then
+        append_report "Transform prophecy probe FAILED: expected row c0=${c0} to appear in sink, but not found"
+        echo "FAIL|c0=${c0}|expect=1|sink_count=${sink_count}" >> "${PROPHECY_EVIDENCE_LOG}"
+        failed=$((failed + 1))
+        continue
+      fi
+
+      if [[ "${TRANSFORM_PROPHECY_STRICT}" == "1" ]]; then
+        src_v=$(mysql -h 127.0.0.1 -P "${MYSQL_PORT}" -u root "${DATABASE}" -sN -e "SELECT CAST(c4 AS DECIMAL(38,2)) FROM ${TABLE} WHERE c0=${c0} LIMIT 1;" 2>/dev/null || echo "")
+        sink_v=$(sink_mysql_exec "${DATABASE}" -sN -e "SELECT CAST(c4 AS DECIMAL(38,2)) FROM ${TABLE} WHERE c0=${c0} LIMIT 1;" 2>/dev/null || echo "")
+        if [[ -n "${src_v}" && -n "${sink_v}" && "${src_v}" != "${sink_v}" ]]; then
+          append_report "Transform prophecy probe FAILED(strict): c4 mismatch for c0=${c0}, source=${src_v}, sink=${sink_v}"
+          echo "FAIL|c0=${c0}|expect=1|strict_c4_mismatch|source=${src_v}|sink=${sink_v}" >> "${PROPHECY_EVIDENCE_LOG}"
+          failed=$((failed + 1))
+          continue
+        fi
+      fi
+
+      echo "PASS|c0=${c0}|expect=1|sink_count=${sink_count}" >> "${PROPHECY_EVIDENCE_LOG}"
+      passed=$((passed + 1))
+      continue
+    fi
+
+    sleep "${retries}"
+    sink_count=$(sink_mysql_exec "${DATABASE}" -sN -e "SELECT COUNT(*) FROM ${TABLE} WHERE c0=${c0};" 2>/dev/null || echo "0")
+    if [[ "${sink_count}" =~ ^[0-9]+$ ]] && [[ "${sink_count}" -gt 0 ]]; then
+      append_report "Transform prophecy probe FAILED: expected row c0=${c0} to be filtered out, but found in sink"
+      echo "FAIL|c0=${c0}|expect=0|sink_count=${sink_count}" >> "${PROPHECY_EVIDENCE_LOG}"
+      failed=$((failed + 1))
+      continue
+    fi
+
+    echo "PASS|c0=${c0}|expect=0|sink_count=${sink_count}" >> "${PROPHECY_EVIDENCE_LOG}"
+    passed=$((passed + 1))
+  done
+
+  append_report "Transform prophecy probe summary: pass=${passed}, fail=${failed}, evidence=${PROPHECY_EVIDENCE_LOG}"
+  if [[ ${failed} -gt 0 ]]; then
+    return 1
+  fi
+
 }
 
 timestamp() {
@@ -639,6 +1238,41 @@ else:
   fi
 }
 
+job_has_no_resource_exception() {
+  local jid="$1"
+  [[ -z "${jid}" ]] && return 1
+  local exc
+  exc=$(flink_api_get "/jobs/${jid}/exceptions")
+  [[ -z "${exc}" ]] && return 1
+  printf '%s' "${exc}" | grep -q 'NoResourceAvailableException'
+}
+
+recover_flink_resources() {
+  append_report "Auto-recover Flink resources: restarting jobmanager/taskmanager"
+  set +e
+  docker compose up -d jobmanager taskmanager >/dev/null 2>&1
+  local rc=$?
+  set -e
+  if [[ ${rc} -ne 0 ]]; then
+    append_report "WARN: docker compose up -d jobmanager taskmanager failed (rc=${rc}), fallback to ./cdcup.sh up"
+    set +e
+    (cd "${SCRIPT_DIR}" && ./cdcup.sh up >/dev/null 2>&1)
+    rc=$?
+    set -e
+  fi
+  if [[ ${rc} -ne 0 ]]; then
+    append_report "ERROR: resource auto-recover failed"
+    return 1
+  fi
+  if ! wait_flink_ready 90; then
+    append_report "ERROR: Flink cluster not ready after auto-recover"
+    return 1
+  fi
+  sleep "${AUTO_RESOURCE_RECOVERY_DELAY}"
+  RESOURCE_RECOVERED_RECENTLY="1"
+  return 0
+}
+
 wait_flink_ready() {
   local retries="${1:-60}"
   local i
@@ -773,6 +1407,7 @@ wait_sink_column_ready() {
 wait_sink_expected_columns() {
   local expected_file="$1"
   local retries="${2:-60}"
+  local stable_window="${3:-${COLUMN_SYNC_STABLE_WINDOW}}"
 
   if [[ "${SINK_SQL_ENABLED}" != "1" || ! -f "${expected_file}" ]]; then
     echo "0 0"
@@ -784,6 +1419,8 @@ wait_sink_expected_columns() {
   local i
   local sink_cols
   local col
+  local last_pending=-1
+  local stable_hits=0
 
   total=$(sort -u "${expected_file}" | sed '/^$/d' | wc -l | tr -d ' ')
   if [[ -z "${total}" || "${total}" == "0" ]]; then
@@ -806,6 +1443,17 @@ wait_sink_expected_columns() {
       if [[ "${pending}" -eq 0 ]]; then
         echo "${total} 0"
         return 0
+      fi
+
+      if [[ "${pending}" -eq "${last_pending}" ]]; then
+        stable_hits=$((stable_hits + 1))
+      else
+        stable_hits=0
+        last_pending="${pending}"
+      fi
+
+      if [[ "${stable_window}" -gt 0 && ${stable_hits} -ge ${stable_window} ]]; then
+        break
       fi
     fi
     sleep 1
@@ -909,8 +1557,11 @@ write_experiment_archive() {
     echo "timestamp=$(timestamp)"
     echo "base_seed=${BASE_SEED}"
     echo "pipeline_yaml=${PIPELINE_YAML}"
+    echo "source_type=${SOURCE_TYPE}"
     echo "sink_type=${SINK_TYPE}"
     echo "report_dir=${REPORT_DIR}"
+    echo "submitted_pipeline_archive=${SUBMITTED_PIPELINE_ARCHIVE}"
+    echo "submitted_transform_section=${SUBMITTED_TRANSFORM_SECTION}"
     echo "random_transform_enabled=${ENABLE_RANDOM_TRANSFORM}"
     echo "random_transform_seed=${RANDOM_TRANSFORM_SEED_EFFECTIVE:-NA}"
     echo "transform_projection=${TRANSFORM_PROJECTION:-NA}"
@@ -1108,8 +1759,11 @@ run_batch_mode_if_needed() {
 
   local r
   local round_seed
+  local round_focus
   local round_report_dir
   local round_rc
+  local round_noresource=0
+  local excluded=0
   local ok=0
   local fail=0
 
@@ -1121,9 +1775,11 @@ run_batch_mode_if_needed() {
 
   for ((r = 1; r <= total_rounds; r++)); do
     round_seed=$((BASE_SEED + (r - 1) * SEED_STEP))
+    round_focus=$(pick_campaign_focus_by_seed "${round_seed}")
     round_report_dir="${REPORT_DIR}_round${r}"
 
     echo "=== ROUND ${r}/${total_rounds} seed=${round_seed} ===" | tee -a "${SUMMARY_FILE}"
+    echo "round_focus=${round_focus}" | tee -a "${SUMMARY_FILE}"
     set +e
     IN_BATCH_MODE=1 \
     ROUNDS=1 \
@@ -1136,9 +1792,24 @@ run_batch_mode_if_needed() {
     WAIT_TABLE_TIMEOUT="${WAIT_TABLE_TIMEOUT}" \
     DML_COUNT="${DML_COUNT}" \
     DDL_COUNT="${DDL_COUNT}" \
+    MIXED_COUNT="${MIXED_COUNT}" \
+    MIXED_DDL_RATIO="${MIXED_DDL_RATIO}" \
+    MIX_DML_POOL_REFILL_SIZE="${MIX_DML_POOL_REFILL_SIZE}" \
+    MIX_DDL_POOL_REFILL_SIZE="${MIX_DDL_POOL_REFILL_SIZE}" \
     DDL_SYNC_TIMEOUT="${DDL_SYNC_TIMEOUT}" \
+    MIX_DDL_SYNC_TIMEOUT="${MIX_DDL_SYNC_TIMEOUT}" \
+    ROW_CONVERGE_RETRIES="${ROW_CONVERGE_RETRIES}" \
+    ENABLE_TRANSFORM_PROPHECY_PROBE="${ENABLE_TRANSFORM_PROPHECY_PROBE}" \
+    TRANSFORM_PROPHECY_ROWS="${TRANSFORM_PROPHECY_ROWS}" \
+    TRANSFORM_PROPHECY_SAMPLE_MAX="${TRANSFORM_PROPHECY_SAMPLE_MAX}" \
+    TRANSFORM_PROPHECY_EDGE_CASES="${TRANSFORM_PROPHECY_EDGE_CASES}" \
+    TRANSFORM_PROPHECY_EXTRA_TRIES_MAX="${TRANSFORM_PROPHECY_EXTRA_TRIES_MAX}" \
+    TRANSFORM_PROPHECY_WAIT_SECONDS="${TRANSFORM_PROPHECY_WAIT_SECONDS}" \
+    TRANSFORM_PROPHECY_STRICT="${TRANSFORM_PROPHECY_STRICT}" \
     AGGRESSIVE_BUG_TRIGGER="${AGGRESSIVE_BUG_TRIGGER}" \
-    TEST_FOCUS="${TEST_FOCUS}" \
+    TEST_FOCUS="${round_focus}" \
+    BUG_CAMPAIGN_MODE="off" \
+    BATCH_ROUND_INDEX="${r}" \
     FOCUS_TIME_ZONE="${FOCUS_TIME_ZONE}" \
     ENABLE_TIME_COLUMNS="${ENABLE_TIME_COLUMNS}" \
     PRINT_SCHEMA_SNAPSHOT="${PRINT_SCHEMA_SNAPSHOT}" \
@@ -1147,10 +1818,27 @@ run_batch_mode_if_needed() {
     round_rc=$?
     set -e
 
+    round_noresource=0
+    if [[ -f "${round_report_dir}/source_sink_final_state.txt" ]]; then
+      if grep -q 'NoResourceAvailableException' "${round_report_dir}/source_sink_final_state.txt"; then
+        round_noresource=1
+      fi
+    fi
+    if [[ ${round_noresource} -eq 0 && -f "${round_report_dir}/pipeline_submit.log" ]]; then
+      if grep -q 'NoResourceAvailableException' "${round_report_dir}/pipeline_submit.log"; then
+        round_noresource=1
+      fi
+    fi
+
     if [[ ${round_rc} -eq 0 ]]; then
       ok=$((ok + 1))
     else
-      fail=$((fail + 1))
+      if [[ "${BATCH_EXCLUDE_NORESOURCE_ROUNDS}" == "1" && ${round_noresource} -eq 1 ]]; then
+        excluded=$((excluded + 1))
+        echo "round_excluded_due_to_noresource=1" | tee -a "${SUMMARY_FILE}"
+      else
+        fail=$((fail + 1))
+      fi
     fi
 
     if [[ -f "${round_report_dir}/source_sink_final_state.txt" ]]; then
@@ -1166,7 +1854,11 @@ run_batch_mode_if_needed() {
   done
 
   echo "Batch run finished at: $(timestamp)" | tee -a "${SUMMARY_FILE}"
-  echo "round_ok=${ok}, round_fail=${fail}" | tee -a "${SUMMARY_FILE}"
+  echo "round_ok=${ok}, round_fail=${fail}, round_excluded=${excluded}" | tee -a "${SUMMARY_FILE}"
+  if [[ ${ok} -lt ${BATCH_HEALTH_MIN_SUCCESS_ROUNDS} ]]; then
+    echo "health_gate_failed=min_success_required=${BATCH_HEALTH_MIN_SUCCESS_ROUNDS}, actual_success=${ok}" | tee -a "${SUMMARY_FILE}"
+    exit 1
+  fi
   echo "summary_file=${SUMMARY_FILE}" | tee -a "${SUMMARY_FILE}"
 
   if [[ ${fail} -gt 0 ]]; then
@@ -1377,6 +2069,13 @@ fi
 
 prepare_transform_runtime_flags
 
+if [[ "${ENABLE_TRANSFORM_PROPHECY_PROBE}" == "1" && -z "${TRANSFORM_PROJECTION}" ]]; then
+  ENABLE_RANDOM_TRANSFORM="1"
+  prepare_transform_runtime_flags
+fi
+
+init_transform_prophecy_row
+
 PIPELINE_SUBMIT_PATH="${PIPELINE_YAML}"
 if [[ "${FLINK36741_MAIN_TRANSFORM}" == "1" && -z "${TRANSFORM_PROJECTION}" ]]; then
   TRANSFORM_PROJECTION="c0, c1, c2, c3, c4 as deposits"
@@ -1459,85 +2158,136 @@ if [[ "${FOCUS_TIMEZONE_MODE}" == "1" ]]; then
   fi
 fi
 
-if [[ "${CANCEL_OLD_JOBS}" = "1" ]]; then
-  append_report "Cancel active Flink jobs before submission"
-  EXISTING_JOBS=$(list_active_job_ids || true)
-  if [[ -n "${EXISTING_JOBS}" ]]; then
-    while IFS= read -r jid; do
-      [[ -z "${jid}" ]] && continue
-      cancel_job_by_id "${jid}"
-    done <<< "${EXISTING_JOBS}"
+archive_and_report_submitted_pipeline "${PIPELINE_SUBMIT_PATH}" || true
+report_transform_support_advice "${SOURCE_TYPE}" "${SINK_TYPE}" "${TRANSFORM_PROJECTION}" "${TRANSFORM_FILTER}"
+
+submit_attempt=1
+submit_max_attempts=$((AUTO_RESOURCE_RECOVERY_RETRIES + 1))
+table_ready="false"
+RESOURCE_RECOVERED_RECENTLY="0"
+
+while [[ ${submit_attempt} -le ${submit_max_attempts} ]]; do
+  append_report "Pipeline submit/wait attempt ${submit_attempt}/${submit_max_attempts}"
+
+  if [[ "${RESOURCE_RECOVERED_RECENTLY}" == "1" ]]; then
+    append_report "Post-recover stabilization wait: ${AUTO_RESOURCE_RECOVERY_POST_WAIT}s"
+    sleep "${AUTO_RESOURCE_RECOVERY_POST_WAIT}"
+    RESOURCE_RECOVERED_RECENTLY="0"
   fi
-  if ! wait_no_active_jobs 90; then
-    append_report "WARN: timeout waiting active jobs to terminate; continue submission"
+
+  if [[ "${CANCEL_OLD_JOBS}" = "1" ]]; then
+    append_report "Cancel active Flink jobs before submission"
+    EXISTING_JOBS=$(list_active_job_ids || true)
+    if [[ -n "${EXISTING_JOBS}" ]]; then
+      while IFS= read -r jid; do
+        [[ -z "${jid}" ]] && continue
+        cancel_job_by_id "${jid}"
+      done <<< "${EXISTING_JOBS}"
+    fi
+    if ! wait_no_active_jobs 90; then
+      append_report "WARN: timeout waiting active jobs to terminate; continue submission"
+    fi
   fi
-fi
 
-set +e
-(cd "${SCRIPT_DIR}" && ./cdcup.sh pipeline "${PIPELINE_SUBMIT_PATH}") >"${PIPELINE_LOG}" 2>&1
-PIPELINE_RC=$?
-set -e
+  set +e
+  (cd "${SCRIPT_DIR}" && ./cdcup.sh pipeline "${PIPELINE_SUBMIT_PATH}") >"${PIPELINE_LOG}" 2>&1
+  PIPELINE_RC=$?
+  set -e
 
-if [[ ${PIPELINE_RC} -ne 0 ]]; then
-  append_report "Pipeline submission failed. See log: ${PIPELINE_LOG}"
-  tail -n 80 "${PIPELINE_LOG}" | tee -a "${REPORT_FILE}"
-  exit 1
-fi
+  if [[ ${PIPELINE_RC} -ne 0 ]]; then
+    append_report "Pipeline submission failed. See log: ${PIPELINE_LOG}"
+    tail -n 80 "${PIPELINE_LOG}" | tee -a "${REPORT_FILE}"
+    if grep -q 'NoResourceAvailableException' "${PIPELINE_LOG}" && [[ ${submit_attempt} -lt ${submit_max_attempts} ]]; then
+      append_report "Detected NoResourceAvailableException during submit, auto-recover and retry"
+      recover_flink_resources || exit 1
+      submit_attempt=$((submit_attempt + 1))
+      continue
+    fi
+    exit 1
+  fi
 
-PIPELINE_JOB_ID=$(grep -Eo 'Job ID: [a-fA-F0-9]+' "${PIPELINE_LOG}" | awk '{print $3}' | tail -n1 || true)
-if [[ -z "${PIPELINE_JOB_ID}" ]]; then
-  PIPELINE_JOB_ID=$(grep -Eo 'job ID is [a-fA-F0-9]+' "${PIPELINE_LOG}" | awk '{print $4}' | tail -n1 || true)
-fi
-if [[ -z "${PIPELINE_JOB_ID}" ]]; then
-  PIPELINE_JOB_ID=$(list_active_job_ids | head -n1 || true)
-fi
-append_report "Pipeline submitted successfully. Job ID: ${PIPELINE_JOB_ID:-UNKNOWN}"
-step_timer_end
+  PIPELINE_JOB_ID=$(grep -Eo 'Job ID: [a-fA-F0-9]+' "${PIPELINE_LOG}" | awk '{print $3}' | tail -n1 || true)
+  if [[ -z "${PIPELINE_JOB_ID}" ]]; then
+    PIPELINE_JOB_ID=$(grep -Eo 'job ID is [a-fA-F0-9]+' "${PIPELINE_LOG}" | awk '{print $4}' | tail -n1 || true)
+  fi
+  if [[ -z "${PIPELINE_JOB_ID}" ]]; then
+    PIPELINE_JOB_ID=$(list_active_job_ids | head -n1 || true)
+  fi
+  append_report "Pipeline submitted successfully. Job ID: ${PIPELINE_JOB_ID:-UNKNOWN}"
 
-append_report ""
-append_report "[Step 3] Wait for sink table creation in ${SINK_LABEL}"
-step_timer_start "Step 3 Wait sink table creation"
+  append_report ""
+  append_report "[Step 3] Wait for sink table creation in ${SINK_LABEL}"
 
-# Trigger at least one CDC event so sink table is materialized even when snapshot is empty.
-mysql -h 127.0.0.1 -P "${MYSQL_PORT}" -u root "${DATABASE}" -e "
+  # Trigger at least one CDC event so sink table is materialized even when snapshot is empty.
+  mysql -h 127.0.0.1 -P "${MYSQL_PORT}" -u root "${DATABASE}" -e "
 INSERT INTO ${TABLE} (c0, c1, c2, c3, c4) VALUES (1, 'bootstrap', 1, 'init', 1.0)
 ON DUPLICATE KEY UPDATE c1='bootstrap', c2=1, c3='init', c4=1.0;
 " >/dev/null 2>&1 || true
 
-table_ready="false"
-for i in $(seq 1 "${EFFECTIVE_WAIT_TABLE_TIMEOUT}"); do
-  if [[ -n "${PIPELINE_JOB_ID:-}" ]]; then
-    state=$(get_job_state "${PIPELINE_JOB_ID}" || true)
-    if [[ "${state}" == "FAILED" || "${state}" == "CANCELED" || "${state}" == "SUSPENDED" ]]; then
-      append_report "Pipeline job entered terminal state early: ${state}"
-      append_job_exception "${PIPELINE_JOB_ID}"
-      exit 1
+  table_ready="false"
+  retry_due_to_no_resource="0"
+  for i in $(seq 1 "${EFFECTIVE_WAIT_TABLE_TIMEOUT}"); do
+    if [[ -n "${PIPELINE_JOB_ID:-}" ]]; then
+      state=$(get_job_state "${PIPELINE_JOB_ID}" || true)
+      if [[ "${state}" == "FAILED" || "${state}" == "CANCELED" || "${state}" == "SUSPENDED" ]]; then
+        append_report "Pipeline job entered terminal state early: ${state}"
+        append_job_exception "${PIPELINE_JOB_ID}"
+        if job_has_no_resource_exception "${PIPELINE_JOB_ID}" && [[ ${submit_attempt} -lt ${submit_max_attempts} ]]; then
+          append_report "Detected NoResourceAvailableException in job exceptions, auto-recover and retry"
+          retry_due_to_no_resource="1"
+        else
+          exit 1
+        fi
+        break
+      fi
     fi
-  fi
 
-  if [[ "${SINK_SQL_ENABLED}" != "1" ]]; then
-    table_ready="true"
-    break
-  fi
-
-  if sink_mysql_exec "" -sN -e "SHOW DATABASES LIKE '${DATABASE}';" 2>/dev/null | grep -q "${DATABASE}"; then
-    if sink_mysql_exec "${DATABASE}" -sN -e "SHOW TABLES LIKE '${TABLE}';" 2>/dev/null | grep -q "${TABLE}"; then
+    if [[ "${SINK_SQL_ENABLED}" != "1" ]]; then
       table_ready="true"
       break
     fi
-  fi
-  sleep 1
-done
 
-if [[ "${table_ready}" != "true" ]]; then
+    if sink_mysql_exec "" -sN -e "SHOW DATABASES LIKE '${DATABASE}';" 2>/dev/null | grep -q "${DATABASE}"; then
+      if sink_mysql_exec "${DATABASE}" -sN -e "SHOW TABLES LIKE '${TABLE}';" 2>/dev/null | grep -q "${TABLE}"; then
+        table_ready="true"
+        break
+      fi
+    fi
+    sleep 1
+  done
+
+  if [[ "${table_ready}" == "true" ]]; then
+    break
+  fi
+
+  if [[ "${retry_due_to_no_resource}" != "1" && -n "${PIPELINE_JOB_ID:-}" ]] && job_has_no_resource_exception "${PIPELINE_JOB_ID}" && [[ ${submit_attempt} -lt ${submit_max_attempts} ]]; then
+    append_report "Sink table wait timeout with NoResourceAvailableException, auto-recover and retry"
+    retry_due_to_no_resource="1"
+  fi
+
+  if [[ "${retry_due_to_no_resource}" == "1" && ${submit_attempt} -lt ${submit_max_attempts} ]]; then
+    recover_flink_resources || exit 1
+    submit_attempt=$((submit_attempt + 1))
+    continue
+  fi
+
   append_report "Sink table not detected within ${EFFECTIVE_WAIT_TABLE_TIMEOUT}s."
   append_report "Try checking job logs and pipeline regex in ${PIPELINE_YAML}."
   append_job_exception "${PIPELINE_JOB_ID:-}"
   exit 1
+done
+
+if [[ "${table_ready}" != "true" ]]; then
+  append_report "ERROR: failed to get sink table ready after ${submit_max_attempts} attempts"
+  exit 1
 fi
 
-append_report "Sink ready in ${SINK_LABEL}: ${DATABASE}.${TABLE}"
 step_timer_end
+append_report "Sink ready in ${SINK_LABEL}: ${DATABASE}.${TABLE}"
+
+if ! run_transform_prophecy_probe; then
+  exit 1
+fi
 
 append_report ""
 append_report "[Step 4] DML phase: generate and execute on source, verify on sink"
@@ -1662,6 +2412,10 @@ DDL_SYNC_OK=0
 DDL_SYNC_FAIL=0
 if [[ "${SINK_SQL_ENABLED}" == "1" && -f "${DDL_EXPECTED_COLS_FILE}" ]]; then
   read -r DDL_SYNC_OK DDL_SYNC_FAIL <<< "$(wait_sink_expected_columns "${DDL_EXPECTED_COLS_FILE}" "${EFFECTIVE_DDL_SYNC_TIMEOUT}")"
+  if [[ "${IN_BATCH_MODE}" == "1" && "${BATCH_ROUND_INDEX}" == "1" && ${DDL_SYNC_FAIL} -gt 0 ]]; then
+    append_report "DDL schema sync warmup retry: round1 extra wait ${BATCH_ROUND1_EXTRA_SCHEMA_SYNC_TIMEOUT}s"
+    read -r DDL_SYNC_OK DDL_SYNC_FAIL <<< "$(wait_sink_expected_columns "${DDL_EXPECTED_COLS_FILE}" "$((EFFECTIVE_DDL_SYNC_TIMEOUT + BATCH_ROUND1_EXTRA_SCHEMA_SYNC_TIMEOUT))")"
+  fi
 fi
 
 append_report "DDL executed: success=${DDL_OK}, failed=${DDL_FAIL}"
@@ -1792,7 +2546,7 @@ sleep "${EFFECTIVE_WAIT_SYNC}"
 MIX_DDL_SYNC_OK=0
 MIX_DDL_SYNC_FAIL=0
 if [[ "${SINK_SQL_ENABLED}" == "1" && -f "${MIX_EXPECTED_COLS_FILE}" ]]; then
-  read -r MIX_DDL_SYNC_OK MIX_DDL_SYNC_FAIL <<< "$(wait_sink_expected_columns "${MIX_EXPECTED_COLS_FILE}" "${EFFECTIVE_DDL_SYNC_TIMEOUT}")"
+  read -r MIX_DDL_SYNC_OK MIX_DDL_SYNC_FAIL <<< "$(wait_sink_expected_columns "${MIX_EXPECTED_COLS_FILE}" "${EFFECTIVE_MIX_DDL_SYNC_TIMEOUT}")"
 fi
 
 MYSQL_COUNT_1=$(mysql -h 127.0.0.1 -P "${MYSQL_PORT}" -u root "${DATABASE}" -sN -e "SELECT COUNT(*) FROM ${TABLE};")
@@ -1800,6 +2554,16 @@ if [[ "${SINK_SQL_ENABLED}" == "1" ]]; then
   SINK_COUNT_1=$(sink_mysql_exec "${DATABASE}" -sN -e "SELECT COUNT(*) FROM ${TABLE};" 2>/dev/null || echo "NA")
 else
   SINK_COUNT_1="NA"
+fi
+
+if [[ "${IN_BATCH_MODE}" == "1" && "${BATCH_ROUND_INDEX}" == "1" && "${SINK_SQL_ENABLED}" == "1" ]]; then
+  if [[ "${MYSQL_COUNT_1}" =~ ^[0-9]+$ && "${SINK_COUNT_1}" =~ ^[0-9]+$ && ${MYSQL_COUNT_1} -gt 0 && ${SINK_COUNT_1} -eq 0 ]]; then
+    append_report "Round1 warmup stabilization: sink row count is zero, extra wait ${BATCH_ROUND1_EXTRA_SYNC_WAIT}s before final summary"
+    sleep "${BATCH_ROUND1_EXTRA_SYNC_WAIT}"
+    wait_row_count_converged "$((ROW_CONVERGE_RETRIES + BATCH_ROUND1_EXTRA_SYNC_WAIT))" >/dev/null 2>&1 || true
+    MYSQL_COUNT_1=$(mysql -h 127.0.0.1 -P "${MYSQL_PORT}" -u root "${DATABASE}" -sN -e "SELECT COUNT(*) FROM ${TABLE};")
+    SINK_COUNT_1=$(sink_mysql_exec "${DATABASE}" -sN -e "SELECT COUNT(*) FROM ${TABLE};" 2>/dev/null || echo "NA")
+  fi
 fi
 MYSQL_COL_COUNT=$(get_source_column_count)
 SINK_COL_COUNT=$(get_sink_column_count)
@@ -1816,7 +2580,7 @@ append_report "Realtime status file: ${STATUS_FILE}"
 if [[ "${TRANSFORM_EXPECTS_ROW_PARITY}" != "1" ]]; then
   append_report "Row count converge check skipped: transform filter may intentionally change sink cardinality"
 elif ! wait_row_count_converged "${ROW_CONVERGE_RETRIES}"; then
-  append_report "WARN: row count not converged within 90s after mixed phase"
+  append_report "WARN: row count not converged within ${ROW_CONVERGE_RETRIES}s after mixed phase"
 fi
 step_timer_end
 
@@ -1824,76 +2588,78 @@ append_report ""
 append_report "[Step 7] Unified schema type validation + PQS"
 step_timer_start "Step 7 Unified schema type validation + PQS"
 
-if [[ "${SINK_SQL_ENABLED}" == "1" ]]; then
-  set +e
-  "${PYTHON_BIN}" "${SCRIPT_DIR}/validators/cdc_schema_pqs_validator.py" \
-    --mysql-port "${MYSQL_PORT}" \
-    --sink-port "${SINK_PORT}" \
-    --database "${DATABASE}" \
-    --tables "${TABLE}" \
-    --sleep-seconds "${SCHEMA_PQS_SLEEP_SECONDS}" \
-    --pqs-trials-per-table "${SCHEMA_PQS_TRIALS}" \
-    --sink-consistency-retries "${SCHEMA_PQS_RETRIES}" \
-    --sink-consistency-delay "${SCHEMA_PQS_RETRY_DELAY}" \
-    --seed "$((BASE_SEED + 700000))" \
-    >"${SCHEMA_PQS_VALIDATOR_LOG}" 2>&1
-  VALIDATOR_RC=$?
-  set -e
+if [[ -n "${TRANSFORM_PROJECTION}" ]]; then
+  append_report "Unified schema/PQS validator skipped: transform projection is enabled and may intentionally change sink column set"
+  step_timer_end
+else
 
-  if [[ ${VALIDATOR_RC} -ne 0 ]]; then
-    append_report "Unified schema/PQS validator failed (rc=${VALIDATOR_RC}). Log: ${SCHEMA_PQS_VALIDATOR_LOG}"
-    tail -n 120 "${SCHEMA_PQS_VALIDATOR_LOG}" | tee -a "${REPORT_FILE}" || true
-    exit 1
+  if [[ "${SINK_SQL_ENABLED}" == "1" ]]; then
+    set +e
+    "${PYTHON_BIN}" "${SCRIPT_DIR}/validators/cdc_schema_pqs_validator.py" \
+      --mysql-port "${MYSQL_PORT}" \
+      --sink-port "${SINK_PORT}" \
+      --database "${DATABASE}" \
+      --tables "${TABLE}" \
+      --sleep-seconds "${SCHEMA_PQS_SLEEP_SECONDS}" \
+      --pqs-trials-per-table "${SCHEMA_PQS_TRIALS}" \
+      --sink-consistency-retries "${SCHEMA_PQS_RETRIES}" \
+      --sink-consistency-delay "${SCHEMA_PQS_RETRY_DELAY}" \
+      --seed "$((BASE_SEED + 700000))" \
+      >"${SCHEMA_PQS_VALIDATOR_LOG}" 2>&1
+    VALIDATOR_RC=$?
+    set -e
+
+    if [[ ${VALIDATOR_RC} -ne 0 ]]; then
+      append_report "Unified schema/PQS validator failed (rc=${VALIDATOR_RC}). Log: ${SCHEMA_PQS_VALIDATOR_LOG}"
+      tail -n 120 "${SCHEMA_PQS_VALIDATOR_LOG}" | tee -a "${REPORT_FILE}" || true
+      exit 1
+    fi
+
+    append_report "Unified schema/PQS validator passed. Log: ${SCHEMA_PQS_VALIDATOR_LOG}"
+    tail -n 80 "${SCHEMA_PQS_VALIDATOR_LOG}" | tee -a "${REPORT_FILE}" || true
+  else
+    append_report "Unified schema/PQS validator skipped: sink has no SQL endpoint"
   fi
 
-  append_report "Unified schema/PQS validator passed. Log: ${SCHEMA_PQS_VALIDATOR_LOG}"
-  tail -n 80 "${SCHEMA_PQS_VALIDATOR_LOG}" | tee -a "${REPORT_FILE}" || true
-else
-  append_report "Unified schema/PQS validator skipped: sink has no SQL endpoint"
+  step_timer_end
 fi
-
-step_timer_end
 
 append_report ""
 append_report "[Step 8] Final source/sink state dump"
 step_timer_start "Step 8 Final source/sink dump"
 
 append_report ""
-if [[ "${PRINT_SCHEMA_SNAPSHOT}" == "1" ]]; then
-  append_report "--- MySQL DESC TABLE ---"
-  mysql -h 127.0.0.1 -P "${MYSQL_PORT}" -u root "${DATABASE}" -e "DESC ${TABLE};" | tee -a "${REPORT_FILE}"
+append_report "--- MySQL DESC TABLE ---"
+mysql -h 127.0.0.1 -P "${MYSQL_PORT}" -u root "${DATABASE}" -e "DESC ${TABLE};" | tee -a "${REPORT_FILE}"
 
-  append_report ""
-  append_report "--- MySQL SHOW CREATE TABLE ---"
-  mysql -h 127.0.0.1 -P "${MYSQL_PORT}" -u root "${DATABASE}" -e "SHOW CREATE TABLE ${TABLE};" | tee -a "${REPORT_FILE}"
+# append_report ""
+# append_report "--- MySQL SHOW CREATE TABLE ---"
+# mysql -h 127.0.0.1 -P "${MYSQL_PORT}" -u root "${DATABASE}" -e "SHOW CREATE TABLE ${TABLE};" | tee -a "${REPORT_FILE}"
 
-  append_report ""
-  if [[ "${SINK_SQL_ENABLED}" == "1" ]]; then
-    append_report "--- ${SINK_LABEL} DESC TABLE ---"
-    sink_mysql_exec "${DATABASE}" -e "DESC ${TABLE};" 2>/dev/null | tee -a "${REPORT_FILE}" || append_report "WARN: failed to dump ${SINK_LABEL} DESC ${TABLE}"
+append_report ""
+if [[ "${SINK_SQL_ENABLED}" == "1" ]]; then
+  append_report "--- ${SINK_LABEL} DESC TABLE ---"
+  sink_mysql_exec "${DATABASE}" -e "DESC ${TABLE};" 2>/dev/null | tee -a "${REPORT_FILE}" || append_report "WARN: failed to dump ${SINK_LABEL} DESC ${TABLE}"
 
-    append_report ""
-    append_report "--- ${SINK_LABEL} SHOW CREATE TABLE ---"
-    sink_mysql_exec "${DATABASE}" -e "SHOW CREATE TABLE ${TABLE};" 2>/dev/null | tee -a "${REPORT_FILE}" || append_report "WARN: failed to dump ${SINK_LABEL} SHOW CREATE ${TABLE}"
-  else
-    append_report "--- ${SINK_LABEL} schema snapshot ---"
-    append_report "Skipped: sink has no SQL endpoint in current mode"
-  fi
+#  append_report ""
+#  append_report "--- ${SINK_LABEL} SHOW CREATE TABLE ---"
+#  sink_mysql_exec "${DATABASE}" -e "SHOW CREATE TABLE ${TABLE};" 2>/dev/null | tee -a "${REPORT_FILE}" || append_report "WARN: failed to dump ${SINK_LABEL} SHOW CREATE ${TABLE}"
+else
+  append_report "--- ${SINK_LABEL} schema snapshot ---"
+  append_report "Skipped: sink has no SQL endpoint in current mode"
 fi
 
-if [[ "${PRINT_DATA_SNAPSHOT}" == "1" ]]; then
-  append_report ""
-  append_report "--- MySQL data snapshot (first 50 rows) ---"
-  mysql -h 127.0.0.1 -P "${MYSQL_PORT}" -u root "${DATABASE}" -e "SELECT * FROM ${TABLE} ORDER BY c0 LIMIT 50;" | tee -a "${REPORT_FILE}"
+append_report ""
+append_report "--- MySQL data snapshot (first 10 rows) ---"
+mysql -h 127.0.0.1 -P "${MYSQL_PORT}" -u root "${DATABASE}" -e "SELECT * FROM ${TABLE} ORDER BY c0 LIMIT 10;" | tee -a "${REPORT_FILE}"
 
-  append_report ""
-  if [[ "${SINK_SQL_ENABLED}" == "1" ]]; then
-    append_report "--- ${SINK_LABEL} data snapshot (first 50 rows) ---"
-    sink_mysql_exec "${DATABASE}" -e "SELECT * FROM ${TABLE} ORDER BY c0 LIMIT 50;" 2>/dev/null | tee -a "${REPORT_FILE}" || append_report "WARN: failed to dump ${SINK_LABEL} data snapshot"
-  else
-    append_report "--- ${SINK_LABEL} data snapshot (first 50 rows) ---"
-    append_report "Skipped: sink has no SQL endpoint in current mode"
-  fi
+append_report ""
+if [[ "${SINK_SQL_ENABLED}" == "1" ]]; then
+  append_report "--- ${SINK_LABEL} data snapshot (first 10 rows) ---"
+  sink_mysql_exec "${DATABASE}" -e "SELECT * FROM ${TABLE} ORDER BY c0 LIMIT 10;" 2>/dev/null | tee -a "${REPORT_FILE}" || append_report "WARN: failed to dump ${SINK_LABEL} data snapshot"
+else
+  append_report "--- ${SINK_LABEL} data snapshot (first 10 rows) ---"
+  append_report "Skipped: sink has no SQL endpoint in current mode"
 fi
 
 # Reconcile summary counters at the end to reduce false mismatches under heavy load.

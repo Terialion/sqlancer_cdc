@@ -2,9 +2,15 @@
 
 [![Stars](https://img.shields.io/github/stars/Terialion/sqlancer_cdc?style=social)](https://github.com/Terialion/sqlancer_cdc/stargazers) [![License](https://img.shields.io/github/license/Terialion/sqlancer_cdc)](https://github.com/Terialion/sqlancer_cdc/blob/master/LICENSE)
 
-轻量说明：本模块包含针对 CDC（Change Data Capture）场景的端到端（E2E）试验与验证脚本、pipeline 定义以及一个用于自动准备运行镜像/配置的 `tools/pull_images.py` 工具。旨在帮助开发者在本地或 CI 中快速复现 CDC 行为与兼容性问题。
+轻量说明：这个仓库提供一套面向 CDC（Change Data Capture）场景的 E2E 试验、验证和复现工具。它把镜像准备、pipeline 提交、回归验证和故障探针串成一条可重复的流程，适合本地调试、CI 回归和问题复现。
 
-目录已按“高星仓库常见模式”重整：文档、探针、生成器、校验器分目录存放，脚本统一使用真实子目录路径。
+## 项目特性
+
+- 一键准备 CDC 运行环境和依赖镜像。
+- 支持 MySQL -> Doris 等常见 CDC 路径的 E2E 回归。
+- 支持 transform、PQS、schema 演化和故障探针。
+- 提供可重现的 seed、报告和提交归档，方便定位问题。
+- 支持纯同步基线、行列对齐模式和随机 transform 压力路径。
 
 目录（快速导航）
 - 简介 / Quick Start
@@ -128,7 +134,12 @@ python3 tools/pull_images.py --batch --mode quick --source-type mysql --sink-typ
 - `--base-seed <int>`：随机种子（可重现）
 - `--dml-count / --ddl-count / --mixed-count`：控制语句数量
 - `--enable-pqs-presence-probe`：在结束时运行 PQS 探针
-- `--random-transform`：启用随机 transform 路径
+- `--random-transform`：启用随机 transform 路径，覆盖更多安全表达式样例（如 `ROUND`、`FLOOR`、`UPPER`、`COALESCE`、`CONCAT`、`CASE`）
+- `--disable-transform`：关闭 transform，作为纯同步基线使用，行列统计最容易对齐
+- `--transform-projection-mode <strict|expand-all>`：transform 投影语义（默认 `expand-all`）
+- `--transform-parity`：保留 `*` 投影并清空 `filter`，用于尽量恢复行列对齐
+- `--enable-transform-prophecy-probe`：启用 transform 预言校验（当前默认开启），注入多条预言行并断言 sink 端应存在/应不存在
+- `--transform-prophecy-strict`：在预言存在时额外校验关键值一致性
 
 示例 — 最小运行：
 
@@ -158,7 +169,72 @@ python3 tools/pull_images.py --batch --mode quick --source-type mysql --sink-typ
   --random-transform
 ```
 
+高级示例：显式 transform（默认 `expand-all`，即自动保留全列并追加表达式）
+
+```bash
+./run_sqlancer_cdc_e2e.sh \
+  --pipeline-yaml pipeline-definition-doris.yaml \
+  --sink-type doris \
+  --transform-source-table "database0.t0" \
+  --transform-projection "c0, CAST(c4 AS INT) as c4_int_probe" \
+  --transform-projection-mode expand-all
+```
+
+高级示例：strict 模式（仅保留 projection 中定义列）
+
+```bash
+./run_sqlancer_cdc_e2e.sh \
+  --pipeline-yaml pipeline-definition-doris.yaml \
+  --sink-type doris \
+  --transform-source-table "database0.t0" \
+  --transform-projection "c0, CAST(c4 AS INT) as c4_int_probe" \
+  --transform-projection-mode strict
+```
+
+高级示例：显式启用 transform 预言校验（默认已开启）
+
+```bash
+./run_sqlancer_cdc_e2e.sh \
+  --pipeline-yaml pipeline-definition-doris.yaml \
+  --sink-type doris \
+  --enable-transform-prophecy-probe
+```
+
+高级示例：纯同步基线（完全关闭 transform，用于确认 source/sink 本身是否对齐）
+
+```bash
+./run_sqlancer_cdc_e2e.sh \
+  --pipeline-yaml pipeline-definition-doris.yaml \
+  --sink-type doris \
+  --disable-transform
+```
+
+说明：如果不关闭 transform，而是同时启用 filter / projection / DDL 演化，最终的 source 和 sink 行列统计本来就可能不一致；`--disable-transform` 是验证“基础同步链路是否正常”的最直接方式。
+
 输出与报告：脚本会在 `REPORT_DIR`（可配置）下产出实验报告与 `experiment_archive.txt` 元数据，用于复现与诊断。
+
+### Transform 提交与生效验证
+
+- 提交时脚本会基于基础 pipeline 生成“最终提交用运行时 YAML”，不会直接覆盖仓库里的 `pipeline-definition-*.yaml`。
+- 每轮会归档最终提交文件到：`REPORT_DIR/submitted_pipeline.yaml`。
+- 每轮会抽取并打印 transform 段到报告，并单独保存：`REPORT_DIR/submitted_pipeline.transform.txt`。
+- 报告中可搜索以下标记快速确认 transform 是否生效：
+  - `Submitted pipeline archive:`
+  - `--- Submitted transform section ---`
+
+### Source/Sink Transform 兼容性顾问
+
+仓库内提供了独立 Python 工具：`tools/transform_support_advisor.py`，用于在提交前评估 source/sink + transform 组合风险。
+
+示例：
+
+```bash
+python3 tools/transform_support_advisor.py \
+  --source-type mysql \
+  --sink-type doris \
+  --projection "c0, CAST(c4 AS INT) as c4_int_probe, CAST(c3 AS INT) as c3_int_probe" \
+  --filter "c0 <= 20000"
+```
 
 ## 故障排查（快速）
 
@@ -166,6 +242,7 @@ python3 tools/pull_images.py --batch --mode quick --source-type mysql --sink-typ
 - 查看 JobManager / TaskManager / sink 日志（容器日志）来定位错误。
 - 在 `REPORT_DIR` 中检查 `experiment_archive.txt` 与报告文件，包含运行参数与变更历史。
 - 依赖缺失：确认 `cdc/lib` 是否包含所需 connector/JDBC/Hadoop jars，或使用 `pull_images.py` 下载。
+- 直接把带小数的值转 INT 的对比说明见 [docs/cast_int_probe_rca.md](docs/cast_int_probe_rca.md)。
 
 ## 贡献 & 社区
 
